@@ -1,4 +1,4 @@
-package main
+package openrouter_request
 
 import (
 	"bufio"
@@ -71,7 +71,7 @@ type StreamChunk struct {
 	Error   *APIError      `json:"error,omitempty"`
 }
 
-func main() {
+func openrouter_clichat() {
 	fmt.Println("Enter your message!")
 	err := godotenv.Load()
 	openrouterAPIKey := os.Getenv("OPENROUTER_API_KEY")
@@ -198,5 +198,4 @@ func main() {
 		log.Fatalf("Error reading OpenRouter stream: %v", err)
 	}
 
-	fmt.Println()
 }
