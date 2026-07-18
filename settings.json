@@ -2,7 +2,7 @@
     "username": "",
     "model":"tencent/hy3:free",
     "max_concurrency": 3,
-    "max_depth": 1,
+    "max_depth": 3,
     "mode": "default"
 
 }

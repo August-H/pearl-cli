@@ -71,7 +71,7 @@ type StreamChunk struct {
 	Error   *APIError      `json:"error,omitempty"`
 }
 
-func openrouter_clichat() {
+func Openrouter_clichat() {
 	fmt.Println("Enter your message!")
 	err := godotenv.Load()
 	openrouterAPIKey := os.Getenv("OPENROUTER_API_KEY")
