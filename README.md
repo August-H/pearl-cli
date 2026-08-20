@@ -1,18 +1,63 @@
 # Pearl CLI
 
-Pearl is a local, continuously available command-line agent. A durable daemon
-accepts jobs over a user-only Unix socket, stores them in SQLite, and processes
-exactly one job at a time with OpenRouter.
+Pearl turns coding requests into durable local jobs. You can queue work, close
+the terminal, return later, and inspect what the agent changed. A background
+daemon runs one OpenRouter-powered job at a time and saves its state in SQLite.
 
-The model is only called when work is queued. The daemon remains available while
-idle without consuming model tokens.
+## What Pearl does
 
-## Build and configure
+- Creates named jobs for a specific project directory.
+- Runs jobs in a durable queue, one at a time.
+- Saves transcripts, tool activity, changed files, errors, and user responses.
+- Pauses a job when the agent needs input without blocking the rest of the queue.
+- Provides a terminal dashboard for running, retrying, answering, reviewing, and
+  archiving jobs.
+- Supports recurring jobs through interval schedules.
+
+Pearl only calls the model while a job is running. An idle daemon does not use
+model tokens.
+
+## Quick start guide
+
+You need Go and an OpenRouter API key. From the repository root, build Pearl and
+run the setup wizard:
 
 ```bash
 go build -o pearl ./cmd/pearl
 ./pearl configure
 ```
+
+Choose `free` to use `openrouter/free`, or choose `custom` and enter an
+OpenRouter model ID.
+
+Open the dashboard:
+
+```bash
+./pearl
+```
+
+Commands entered in the dashboard omit the `pearl` prefix. Create your first
+job from the current directory:
+
+```text
+job -n "fix tests" "inspect this repository and fix the failing tests"
+jobs
+```
+
+In the jobs list, select `fix tests` and press Space. Pearl fills the command box
+with `run fix\ tests`. Press Enter to start it. When it finishes, open `jobs`
+again and press Enter on the job to inspect its transcript, changed files, and
+tool activity.
+
+The same workflow works without the dashboard:
+
+```bash
+./pearl job -n "fix tests" "inspect this repository and fix the failing tests"
+./pearl run "fix tests"
+./pearl jobs
+```
+
+## Configuration and storage
 
 Pearl stores its API key, settings, SQLite database, socket, and log under the
 platform user config directory in a `pearl` subdirectory. Set
@@ -23,7 +68,7 @@ only the Unix socket path.
 a custom model ID. It stores the selection in the durable `settings.json`. The
 same wizard runs inside the dashboard command box when you enter `configure`.
 
-## Run Pearl
+## Jobs and directories
 
 Create a job from the directory Pearl should work in, then run it by ID:
 
