@@ -1,9 +1,6 @@
 # Pearl CLI
 
-Pearl turns coding requests into durable local jobs. You can queue work, close
-the terminal, return later, and inspect what the agent changed. A background
-daemon runs one OpenRouter-powered job at a time and saves its state in SQLite.
-
+Pearl is an agent task manager. You can assign work as jobs, close the terminal, return later, and get information on the agent changes. Currently only supports OpenRouter. 
 ## What Pearl does
 
 - Creates named jobs for a specific project directory.
