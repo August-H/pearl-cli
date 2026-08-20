@@ -1,8 +1,11 @@
 {
     "username": "",
-    "model":"tencent/hy3:free",
-    "max_concurrency": 3,
-    "max_depth": 3,
+    "model":"openrouter/free",
+    "max_concurrency": 1,
+    "max_depth": 30000000,
+    "max_job_seconds": 1800,
+    "max_file_bytes": 4194304,
+    "approved_workspace_roots": [],
     "mode": "default"
 
 }

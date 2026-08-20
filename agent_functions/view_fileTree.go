@@ -1,8 +1,10 @@
 package agent_functions
 
 import (
+	"fmt"
 	"io/fs"
 	"path/filepath"
+	"strings"
 )
 
 func View_fileTree(relative_path string) ([]string, error) {
@@ -20,10 +22,13 @@ func View_fileTree(relative_path string) ([]string, error) {
 		if path == root {
 			return nil
 		}
-		if d.IsDir() && d.Name() == ".git" {
+		if d.IsDir() && strings.EqualFold(d.Name(), ".git") {
 			return filepath.SkipDir
 		}
-		if d.Name() == ".env" {
+		if strings.HasPrefix(strings.ToLower(d.Name()), ".env") {
+			if d.IsDir() {
+				return filepath.SkipDir
+			}
 			return nil
 		}
 
@@ -32,6 +37,9 @@ func View_fileTree(relative_path string) ([]string, error) {
 			return err
 		}
 		filetree = append(filetree, filepath.ToSlash(pathFromRoot))
+		if len(filetree) > 10000 {
+			return fmt.Errorf("file tree exceeds the 10000-entry limit")
+		}
 
 		return nil
 	})
