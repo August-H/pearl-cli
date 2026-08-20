@@ -57,6 +57,56 @@ The same workflow works without the dashboard:
 ./pearl jobs
 ```
 
+## Add Pearl to PATH
+
+Adding the compiled binary to `PATH` lets you run `pearl` from any directory
+instead of typing `./pearl` or its full path.
+
+### macOS
+
+Install Pearl in a user-owned binary directory:
+
+```bash
+mkdir -p "$HOME/.local/bin"
+install -m 755 ./pearl "$HOME/.local/bin/pearl"
+```
+
+Add this line to `~/.zshrc`:
+
+```bash
+export PATH="$HOME/.local/bin:$PATH"
+```
+
+Reload the shell and check the installation:
+
+```bash
+source "$HOME/.zshrc"
+pearl --help
+```
+
+### Windows
+
+Build the Windows executable, copy it into a user-owned directory, and add that
+directory to the user PATH. Run these commands in PowerShell:
+
+```powershell
+go build -o pearl.exe ./cmd/pearl
+$PearlBin = Join-Path $HOME "bin"
+New-Item -ItemType Directory -Force -Path $PearlBin | Out-Null
+Copy-Item .\pearl.exe (Join-Path $PearlBin "pearl.exe")
+
+[string]$UserPath = [Environment]::GetEnvironmentVariable("Path", "User")
+if (($UserPath -split ";") -notcontains $PearlBin) {
+    $NewPath = if ($UserPath) { "$UserPath;$PearlBin" } else { $PearlBin }
+    [Environment]::SetEnvironmentVariable("Path", $NewPath, "User")
+}
+
+$env:Path = "$env:Path;$PearlBin"
+pearl --help
+```
+
+New terminals will pick up the saved PATH automatically.
+
 ## Configuration and storage
 
 Pearl stores its API key, settings, SQLite database, socket, and log under the
