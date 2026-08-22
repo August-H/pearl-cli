@@ -1,0 +1,10 @@
+{
+  "username": "daemon-resource-monitor",
+  "model": "openrouter/free",
+  "max_concurrency": 1,
+  "max_depth": 1,
+  "max_job_seconds": 30,
+  "max_file_bytes": 1048576,
+  "approved_workspace_roots": [],
+  "mode": "default"
+}

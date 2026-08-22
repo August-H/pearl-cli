@@ -112,8 +112,21 @@ type RunOptions struct {
 	WorkspaceRoot string
 	MaxDuration   time.Duration
 	MaxFileBytes  int64
+	MaxToolDepth  int
+	SystemPrompt  string
+	Tools         []Tool
+	OnlyTools     bool
 	Events        EventSink
 	State         CheckpointStore
+}
+
+// Tool adds a function that the model can call during a run. Parameters must
+// be a JSON Schema object describing the function arguments.
+type Tool struct {
+	Name        string
+	Description string
+	Parameters  map[string]any
+	Execute     func(context.Context, json.RawMessage) (any, error)
 }
 
 var sharedAgentHTTPClient = &http.Client{Timeout: 5 * time.Minute}
@@ -169,7 +182,10 @@ func Run(ctx context.Context, prompt string, options RunOptions) (string, error)
 		return "", err
 	}
 
-	maxDepth := settings.Max_depth
+	maxDepth := options.MaxToolDepth
+	if maxDepth <= 0 {
+		maxDepth = settings.Max_depth
+	}
 	if maxDepth <= 0 {
 		maxDepth = 8
 	}
@@ -214,7 +230,11 @@ func Run(ctx context.Context, prompt string, options RunOptions) (string, error)
 		maxFileBytes = 4 << 20
 	}
 
-	messages := []agentMessage{{Role: "user", Content: prompt}}
+	messages := make([]agentMessage, 0, 2)
+	if systemPrompt := strings.TrimSpace(options.SystemPrompt); systemPrompt != "" {
+		messages = append(messages, agentMessage{Role: "system", Content: systemPrompt})
+	}
+	messages = append(messages, agentMessage{Role: "user", Content: prompt})
 	loadedTranscript := false
 	if options.State != nil && options.JobID != "" {
 		transcript, err := options.State.LoadTranscript(ctx, options.JobID)
@@ -257,6 +277,7 @@ func Run(ctx context.Context, prompt string, options RunOptions) (string, error)
 			settings.Model,
 			messages,
 			options.Events,
+			agentTools(options),
 		)
 		if err != nil {
 			return "", err
@@ -423,13 +444,14 @@ func requestAgentCompletion(
 	model string,
 	messages []agentMessage,
 	events EventSink,
+	tools []map[string]any,
 ) (agentMessage, error) {
 	payload := map[string]any{
 		"model":               model,
 		"messages":            messages,
 		"reasoning":           Reasoning{Enabled: true},
 		"stream":              true,
-		"tools":               allowedAgentTools(),
+		"tools":               tools,
 		"tool_choice":         "auto",
 		"parallel_tool_calls": false,
 	}
@@ -676,6 +698,35 @@ func allowedAgentTools() []map[string]any {
 	}
 }
 
+func agentTools(options RunOptions) []map[string]any {
+	tools := make([]map[string]any, 0, len(options.Tools)+5)
+	if !options.OnlyTools {
+		tools = append(tools, allowedAgentTools()...)
+	}
+	for _, tool := range options.Tools {
+		if strings.TrimSpace(tool.Name) == "" || tool.Execute == nil {
+			continue
+		}
+		parameters := tool.Parameters
+		if parameters == nil {
+			parameters = map[string]any{
+				"type":                 "object",
+				"properties":           map[string]any{},
+				"additionalProperties": false,
+			}
+		}
+		tools = append(tools, map[string]any{
+			"type": "function",
+			"function": map[string]any{
+				"name":        tool.Name,
+				"description": tool.Description,
+				"parameters":  parameters,
+			},
+		})
+	}
+	return tools
+}
+
 func executeAgentTool(
 	ctx context.Context,
 	call agentToolCall,
@@ -708,6 +759,13 @@ func executeAgentTool(
 			return agentMessage{}, err
 		}
 		result = resolved
+	} else if custom, found := customAgentTool(options.Tools, call.Function.Name); found {
+		value, err := custom.Execute(ctx, json.RawMessage(call.Function.Arguments))
+		if err != nil {
+			result = agentToolResult{Error: err.Error()}
+		} else {
+			result = agentToolResult{Success: true, Result: value}
+		}
 	} else {
 		result = runAgentTool(call, workspaceRoot, maxFileBytes)
 	}
@@ -729,6 +787,15 @@ func executeAgentTool(
 		}
 	}
 	return toolResultMessage(call, content), nil
+}
+
+func customAgentTool(tools []Tool, name string) (Tool, bool) {
+	for _, tool := range tools {
+		if tool.Name == name && tool.Execute != nil {
+			return tool, true
+		}
+	}
+	return Tool{}, false
 }
 
 func resolveUserInputTool(

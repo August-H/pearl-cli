@@ -219,6 +219,37 @@ func TestParseDashboardCommandRejectsIncompleteInput(t *testing.T) {
 	}
 }
 
+func TestParseDashboardAutonomousCommand(t *testing.T) {
+	tests := []struct {
+		name      string
+		arguments []string
+		want      dashboardAutonomousCommand
+	}{
+		{name: "latest", want: dashboardAutonomousCommand{latest: true}},
+		{
+			name: "new goal", arguments: []string{"audit", "the", "release"},
+			want: dashboardAutonomousCommand{goal: "audit the release"},
+		},
+		{
+			name: "resume", arguments: []string{"--resume", "auto_123"},
+			want: dashboardAutonomousCommand{resumeID: "auto_123"},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got, err := parseDashboardAutonomousCommand(test.arguments)
+			if err != nil || got != test.want {
+				t.Fatalf("autonomous command = %#v, err=%v, want %#v", got, err, test.want)
+			}
+		})
+	}
+	for _, arguments := range [][]string{{"--resume"}, {"--resume", "one", "two"}, {"--bad"}} {
+		if _, err := parseDashboardAutonomousCommand(arguments); err == nil {
+			t.Fatalf("invalid autonomous arguments were accepted: %#v", arguments)
+		}
+	}
+}
+
 func TestRenderDashboardShowsCommandPromptAndNotice(t *testing.T) {
 	output := renderDashboardWithInput(
 		nil,
@@ -306,6 +337,15 @@ func TestDashboardCommandSuggestionsFilterNavigateAndFill(t *testing.T) {
 	}
 	if got := dashboardMoveSuggestion(" ", 0, -1); got != len(all)-1 {
 		t.Fatalf("moving above the full command list selected %d, want %d", got, len(all)-1)
+	}
+	autonomous := dashboardCommandSuggestions("aut")
+	if len(autonomous) != 1 || autonomous[0].usage != "autonomous" {
+		t.Fatalf("autonomous top-level suggestions = %#v", autonomous)
+	}
+	resume := dashboardCommandSuggestions("autonomous --")
+	if len(resume) != 1 || resume[0].usage != "--resume <session-id>" ||
+		resume[0].completion != "autonomous --resume " {
+		t.Fatalf("autonomous resume suggestions = %#v", resume)
 	}
 }
 

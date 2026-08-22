@@ -72,6 +72,53 @@ func TestCreateNamedJobUsesNameAsID(t *testing.T) {
 	}
 }
 
+func TestAutonomousSessionPersistsLinkedQueuedJobs(t *testing.T) {
+	state := openTestStore(t)
+	ctx := context.Background()
+	session, err := state.CreateAutonomousSession(
+		ctx, "prepare the release", t.TempDir(),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if session.Status != AutonomousRunning || session.Terminal() {
+		t.Fatalf("new autonomous session = %#v", session)
+	}
+	first, err := state.CreateAutonomousJob(ctx, session.ID, "run the tests")
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := state.CreateAutonomousJob(ctx, session.ID, "review the release notes")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.Status != JobQueued || second.Status != JobQueued || first.ID == second.ID {
+		t.Fatalf("autonomous jobs = %#v %#v", first, second)
+	}
+	details, err := state.AutonomousDetails(ctx, session.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if details.Session.ID != session.ID || len(details.Jobs) != 2 || len(details.Events) != 2 ||
+		details.Jobs[0].ID != first.ID || details.Jobs[1].ID != second.ID {
+		t.Fatalf("autonomous details = %#v", details)
+	}
+	if err := state.UpdateAutonomousSession(
+		ctx, session.ID, AutonomousCompleted, "release ready", "",
+	); err != nil {
+		t.Fatal(err)
+	}
+	finished, err := state.GetAutonomousSession(ctx, session.ID)
+	if err != nil || !finished.Terminal() || finished.Summary != "release ready" ||
+		finished.FinishedAt == nil {
+		t.Fatalf("finished autonomous session = %#v, err=%v", finished, err)
+	}
+	if _, err := state.CreateAutonomousJob(ctx, session.ID, "too late"); err == nil ||
+		!strings.Contains(err.Error(), "already completed") {
+		t.Fatalf("create job in completed session error = %v", err)
+	}
+}
+
 func TestPendingJobMustBeQueuedBeforeItCanRun(t *testing.T) {
 	state := openTestStore(t)
 	ctx := context.Background()
@@ -93,6 +140,37 @@ func TestPendingJobMustBeQueuedBeforeItCanRun(t *testing.T) {
 	}
 	if _, _, err := state.QueueJob(ctx, job.ID); err == nil {
 		t.Fatal("queued the same pending job twice")
+	}
+}
+
+func TestCancelPendingJobMarksItCancelledAndUnrunnable(t *testing.T) {
+	state := openTestStore(t)
+	ctx := context.Background()
+	job, err := state.CreatePendingNamedJob(
+		ctx, "cancel me", "temporary job", t.TempDir(),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cancelled, err := state.RequestCancel(ctx, job.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cancelled.Status != JobCancelled || !cancelled.Terminal() ||
+		cancelled.FinishedAt == nil || cancelled.CancelRequested {
+		t.Fatalf("cancelled pending job = %#v", cancelled)
+	}
+	loaded, err := state.GetJob(ctx, job.ID)
+	if err != nil || loaded.Status != JobCancelled || loaded.FinishedAt == nil {
+		t.Fatalf("loaded cancelled pending job = %#v, err=%v", loaded, err)
+	}
+	if _, _, err := state.QueueJob(ctx, job.ID); err == nil ||
+		!strings.Contains(err.Error(), "cannot be run from status") {
+		t.Fatalf("queue cancelled job error = %v", err)
+	}
+	if again, err := state.RequestCancel(ctx, job.ID); err != nil ||
+		again.Status != JobCancelled {
+		t.Fatalf("second cancel = %#v, err=%v", again, err)
 	}
 }
 

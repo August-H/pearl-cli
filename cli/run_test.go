@@ -197,7 +197,9 @@ func TestRunCommandRetriesFailedJob(t *testing.T) {
 
 func TestJobWithoutAgentOutputBecomesFailed(t *testing.T) {
 	client := startTestDaemon(t, preflightFailureRunner{})
-	job, err := client.submit(context.Background(), "wait to run", t.TempDir())
+	directory := t.TempDir()
+	t.Chdir(directory)
+	job, err := client.submit(context.Background(), "wait to run", directory)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -206,7 +208,7 @@ func TestJobWithoutAgentOutputBecomesFailed(t *testing.T) {
 	}
 	waitForTestJobStatus(t, client, job.ID, store.JobFailed)
 
-	boardOutput, exitCode := captureTestStdout(t, listJobs)
+	boardOutput, exitCode := captureTestStdout(t, func() int { return listJobs(false) })
 	if exitCode != 0 || !strings.Contains(boardOutput, store.JobFailed) ||
 		strings.Contains(boardOutput, store.JobPending) {
 		t.Fatalf("job board exit=%d output=%q", exitCode, boardOutput)
@@ -233,7 +235,9 @@ func TestDaemonClientArchivesAJob(t *testing.T) {
 	if err != nil || len(jobs) != 0 {
 		t.Fatalf("regular jobs after archive = %#v, err=%v", jobs, err)
 	}
-	output, exitCode := captureTestStdout(t, listArchivedJobs)
+	output, exitCode := captureTestStdout(t, func() int {
+		return listArchivedJobs(true)
+	})
 	if exitCode != 0 || !strings.Contains(output, job.ID) ||
 		!strings.Contains(output, store.JobPending) {
 		t.Fatalf("archive list exit=%d output=%q", exitCode, output)
@@ -278,6 +282,19 @@ func TestHelpListsEveryCommandWithoutAdvancedTopic(t *testing.T) {
 	}
 	if count := strings.Count(output, "pearl daemon"); count != 1 {
 		t.Fatalf("pearl daemon appears %d times, want one grouped header:\n%s", count, output)
+	}
+}
+
+func TestVersionCommandPrintsTheVersion(t *testing.T) {
+	for _, arguments := range [][]string{
+		{"version"}, {"-v"}, {"--version"},
+	} {
+		output, exitCode := captureTestStdout(t, func() int {
+			return Run(arguments)
+		})
+		if exitCode != 0 || output != "pearl version "+version+"\n" {
+			t.Fatalf("%v exit=%d output=%q", arguments, exitCode, output)
+		}
 	}
 }
 
@@ -449,7 +466,7 @@ func TestJobCommandCreatesNamedDetachedJob(t *testing.T) {
 	if err != nil || loaded.ID != "release prep" {
 		t.Fatalf("load custom job ID = %#v, err=%v", loaded, err)
 	}
-	boardOutput, exitCode := captureTestStdout(t, listJobs)
+	boardOutput, exitCode := captureTestStdout(t, func() int { return listJobs(false) })
 	if exitCode != 0 || !strings.Contains(boardOutput, "release prep") {
 		t.Fatalf("job board exit=%d output=%q", exitCode, boardOutput)
 	}
@@ -559,7 +576,9 @@ func TestFormatJobCreatedAtUsesReadableLocalTimeWithoutSeconds(t *testing.T) {
 
 func TestWaitingJobAppearsOnBoardAndRespondStreamsContinuation(t *testing.T) {
 	client := startTestDaemon(t, &userInputRunner{})
-	job, err := client.submit(context.Background(), "pick a color", t.TempDir())
+	directory := t.TempDir()
+	t.Chdir(directory)
+	job, err := client.submit(context.Background(), "pick a color", directory)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -576,7 +595,7 @@ func TestWaitingJobAppearsOnBoardAndRespondStreamsContinuation(t *testing.T) {
 		t.Fatalf("waiting attach exit=%d output=%q", exitCode, attachOutput)
 	}
 
-	boardOutput, exitCode := captureTestStdout(t, listJobs)
+	boardOutput, exitCode := captureTestStdout(t, func() int { return listJobs(false) })
 	if exitCode != 0 || !strings.Contains(boardOutput, store.JobWaitingInput) ||
 		strings.Contains(boardOutput, "Which color should I use?") {
 		t.Fatalf("job board exit=%d output=%q", exitCode, boardOutput)
@@ -589,6 +608,88 @@ func TestWaitingJobAppearsOnBoardAndRespondStreamsContinuation(t *testing.T) {
 		t.Fatalf("respond exit=%d output=%q", exitCode, responseOutput)
 	}
 	waitForTestJobStatus(t, client, job.ID, store.JobCompleted)
+}
+
+func TestJobsBoardScopesToCurrentWorkspaceByDefault(t *testing.T) {
+	client := startTestDaemon(t, answerRunner{})
+	local := t.TempDir()
+	other := t.TempDir()
+	t.Chdir(local)
+	ctx := context.Background()
+	localJob, err := client.submitNamed(ctx, "local job", "here", local)
+	if err != nil {
+		t.Fatal(err)
+	}
+	farJob, err := client.submitNamed(ctx, "far job", "away", other)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, jobID := range []string{localJob.ID, farJob.ID} {
+		if _, _, err := client.startJob(ctx, jobID); err != nil {
+			t.Fatal(err)
+		}
+	}
+	waitForTestJobStatus(t, client, localJob.ID, store.JobCompleted)
+	waitForTestJobStatus(t, client, farJob.ID, store.JobCompleted)
+
+	boardOutput, exitCode := captureTestStdout(t, func() int {
+		return Run([]string{"jobs"})
+	})
+	if exitCode != 0 || !strings.Contains(boardOutput, "local job") {
+		t.Fatalf("scoped board exit=%d output=%q", exitCode, boardOutput)
+	}
+	if strings.Contains(boardOutput, "far job") || strings.Contains(boardOutput, "WORKSPACE") {
+		t.Fatalf("scoped board leaked other workspaces: %q", boardOutput)
+	}
+
+	allOutput, exitCode := captureTestStdout(t, func() int {
+		return Run([]string{"jobs", "--all"})
+	})
+	if exitCode != 0 || !strings.Contains(allOutput, "local job") ||
+		!strings.Contains(allOutput, "far job") ||
+		!strings.Contains(allOutput, "WORKSPACE") {
+		t.Fatalf("--all board exit=%d output=%q", exitCode, allOutput)
+	}
+
+	if err := client.archiveJob(ctx, farJob.ID); err != nil {
+		t.Fatal(err)
+	}
+	archiveOutput, exitCode := captureTestStdout(t, func() int {
+		return Run([]string{"archive"})
+	})
+	if exitCode != 0 || strings.Contains(archiveOutput, "far job") {
+		t.Fatalf("scoped archive exit=%d output=%q", exitCode, archiveOutput)
+	}
+	archiveAllOutput, exitCode := captureTestStdout(t, func() int {
+		return Run([]string{"archive", "--all"})
+	})
+	if exitCode != 0 || !strings.Contains(archiveAllOutput, "far job") {
+		t.Fatalf("--all archive exit=%d output=%q", exitCode, archiveAllOutput)
+	}
+}
+
+func TestStatusListsWaitingJobsFromEveryWorkspace(t *testing.T) {
+	client := startTestDaemon(t, &userInputRunner{})
+	other := t.TempDir()
+	job, err := client.submit(context.Background(), "pick a color", other)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := client.startJob(context.Background(), job.ID); err != nil {
+		t.Fatal(err)
+	}
+	waitForTestJobStatus(t, client, job.ID, store.JobWaitingInput)
+
+	output, exitCode := captureTestStdout(t, func() int {
+		return Run([]string{"status"})
+	})
+	if exitCode != 0 {
+		t.Fatalf("status exit code = %d", exitCode)
+	}
+	if !strings.Contains(output, "Waiting for input:") ||
+		!strings.Contains(output, job.ID) {
+		t.Fatalf("status output is missing the waiting job ID:\n%s", output)
+	}
 }
 
 func startTestDaemon(t *testing.T, runner daemon.AgentRunner) *daemonClient {

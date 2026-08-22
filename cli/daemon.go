@@ -11,11 +11,13 @@ import (
 	"path/filepath"
 	"runtime"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
 	"github.com/August-H/pearl-cli/internal/daemon"
 	"github.com/August-H/pearl-cli/internal/pearlpaths"
+	"github.com/August-H/pearl-cli/internal/store"
 	"github.com/August-H/pearl-cli/openrouter_request"
 )
 
@@ -198,9 +200,31 @@ func printDaemonStatus() int {
 	if queued, ok := status["queued_jobs"].(float64); ok {
 		fmt.Println("Queued jobs:", int(queued))
 	}
-	if waiting, ok := status["waiting_input_jobs"].(float64); ok {
-		fmt.Println("Jobs waiting for input:", int(waiting))
+	waiting, waitingOk := status["waiting_input_jobs"].(float64)
+	if !waitingOk || int(waiting) == 0 {
+		return 0
 	}
+	jobs, err := client.jobs(ctx)
+	if err != nil {
+		fmt.Println("Jobs waiting for input:", int(waiting))
+		return 0
+	}
+	var waitingIDs []string
+	for _, job := range jobs {
+		if job.Status == store.JobWaitingInput {
+			waitingIDs = append(waitingIDs, job.ID)
+		}
+	}
+	const displayLimit = 3
+	displayed := waitingIDs
+	suffix := ""
+	if len(waitingIDs) > displayLimit {
+		displayed = waitingIDs[:displayLimit]
+		suffix = fmt.Sprintf(", and %d more", len(waitingIDs)-displayLimit)
+	}
+	fmt.Println(
+		"Waiting for input:", strings.Join(displayed, ", ")+suffix,
+	)
 	return 0
 }
 

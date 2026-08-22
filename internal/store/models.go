@@ -66,3 +66,39 @@ type Schedule struct {
 	Enabled         bool      `json:"enabled"`
 	CreatedAt       time.Time `json:"created_at"`
 }
+
+const (
+	AutonomousRunning      = "running"
+	AutonomousReviewing    = "reviewing"
+	AutonomousWaitingInput = "waiting_input"
+	AutonomousCompleted    = "completed"
+	AutonomousFailed       = "failed"
+	AutonomousCancelled    = "cancelled"
+)
+
+type AutonomousSession struct {
+	ID            string     `json:"id"`
+	Goal          string     `json:"goal"`
+	WorkspaceRoot string     `json:"workspace_root"`
+	Status        string     `json:"status"`
+	Summary       string     `json:"summary,omitempty"`
+	Error         string     `json:"error,omitempty"`
+	CreatedAt     time.Time  `json:"created_at"`
+	UpdatedAt     time.Time  `json:"updated_at"`
+	FinishedAt    *time.Time `json:"finished_at,omitempty"`
+}
+
+func (session AutonomousSession) Terminal() bool {
+	switch session.Status {
+	case AutonomousCompleted, AutonomousFailed, AutonomousCancelled:
+		return true
+	default:
+		return false
+	}
+}
+
+type AutonomousDetails struct {
+	Session AutonomousSession `json:"session"`
+	Jobs    []Job             `json:"jobs"`
+	Events  []Event           `json:"events,omitempty"`
+}
