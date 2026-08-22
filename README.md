@@ -10,6 +10,8 @@ Pearl is an agent task manager. You can assign work as jobs, close the terminal,
 - Provides a terminal dashboard for running, retrying, answering, reviewing, and
   archiving jobs.
 - Supports recurring jobs through interval schedules.
+- Runs autonomous sessions where a coordinator creates subagent jobs, reviews
+  their results, and assigns follow-up work.
 
 Pearl only calls the model while a job is running. An idle daemon does not use
 model tokens.
@@ -53,6 +55,15 @@ The same workflow works without the dashboard:
 ./pearl run "fix tests"
 ./pearl jobs
 ```
+
+For a larger goal, start autonomous mode from the project directory:
+
+```bash
+./pearl autonomous "audit the release, fix the problems you find, and verify the result"
+```
+
+Pearl opens a live TUI and keeps the coordinator in the daemon. Press `q` to
+detach. The session and its child jobs continue running.
 
 ## Add Pearl to PATH
 
@@ -155,11 +166,15 @@ operations:
 ./pearl respond <job-id> "your answer"
 ./pearl cancel <job-id>
 ./pearl retry <job-id>
+./pearl autonomous "goal"
+./pearl autonomous --resume <session-id>
 ```
 
 Running `pearl` without a command opens the dashboard.
 
-`pearl jobs` opens a selectable list when run in a terminal. Use the arrow
+`pearl jobs` lists jobs for the current directory and its subfolders. Use
+`--all` to list every workspace; the listing then adds a WORKSPACE column. In
+the selectable list, use the arrow
 keys or `j` and `k` to move between jobs, Page Up and Page Down to move faster,
 and Enter to open the selected job. Space preloads `run <job-id>` for pending
 jobs, `retry <job-id>` for finished jobs, or `respond <job-id> ` for jobs waiting
@@ -169,25 +184,35 @@ to archive the selected job, then confirm with `y` or Enter. Pearl keeps the
 job transcript, changed files, tool activity, and timestamps. Queued and running
 jobs must finish or be cancelled before archival.
 
-`pearl archive` opens the archived job list. Navigate it like `pearl jobs` and
-press Enter to open the selected job. Archived jobs do not appear on the normal
-job board, in run autocomplete, or in the daemon queue.
+`pearl archive` opens the archived job list for the current directory. Add
+`--all` to browse archived jobs from every workspace. Navigate it like `pearl
+jobs` and press Enter to open the selected job. Archived jobs do not appear on
+the normal job board, in run autocomplete, or in the daemon queue.
 
 The job report is split into expandable sections. Use the arrow keys to select
 a section, Enter or Space to expand it, `j` and `k` or Page Up and Page Down to
 scroll, `a` to expand everything, `c` to collapse everything, and `q` to exit.
 Piped output remains plain text.
 
+`pearl status` shows the daemon state, queued count, and the IDs of every job
+waiting for input across all workspaces, so a paused job in another repository
+is never hidden.
+
 `Ctrl-C` detaches the current terminal from an attached job; it does not cancel
 the job. Use `pearl cancel` when cancellation is intended.
 
 `pearl dashboard` opens a live terminal view of running, queued, and
-`waiting_input` jobs. Type any Pearl command at the prompt without the `pearl`
-prefix, such as `cancel <job-id>` or `respond <job-id> "answer"`. Run `jobs` to
-open the selectable job list inside the dashboard. Enter opens the selected
+`waiting_input` jobs from every workspace. Type any Pearl command at the prompt
+without the `pearl` prefix, such as `cancel <job-id>` or `respond <job-id>
+"answer"`. Run `jobs` to open the selectable job list inside the dashboard; it
+shows the current directory by default and `jobs --all` shows every workspace.
+Press `a` inside the list to toggle between them. Enter opens the selected
 job, Space preloads its run, retry, or response command, and `q` returns to the
 list or dashboard. Type `archive` to browse archived jobs without leaving the
-dashboard. The dashboard returns after other commands finish. Type
+dashboard. Enter `autonomous "goal"` to start an autonomous session, or enter
+`autonomous` to reopen the latest one. The autonomous screen updates in place.
+Press `q` to return to the main dashboard while the session keeps running. The
+dashboard returns after other commands finish. Type
 `exit` or `quit`, or press `Ctrl-C`, to close it. Set `NO_COLOR=1` to disable
 colors.
 
@@ -203,11 +228,49 @@ The response is added to the saved agent transcript, so the resumed run keeps
 the messages and completed tool calls from before the question. A waiting job
 does not occupy the worker; other queued jobs can continue in the meantime.
 
+## Autonomous mode
+
+`pearl autonomous "goal"` starts a persisted coordinator for the current
+directory. The coordinator cannot edit files itself. It can create queued child
+jobs, wait for their agents, inspect every saved result or error, and create
+follow-up jobs. It finishes the session only after it reviews the child jobs and
+judges the goal complete.
+
+The autonomous TUI lists every child job and keeps an activity feed built from
+the durable job status events. It records job creation and each transition such
+as `queued → running` and `running → completed`. The screen stays open after the
+session finishes until you press `q`.
+
+Detaching does not stop the coordinator. Run `pearl autonomous` to reopen the
+latest session, or `pearl autonomous --resume <session-id>` to open a specific
+one. If a child job asks for input, detach and answer it with:
+
+```bash
+pearl respond <job-id> "answer"
+```
+
+The coordinator resumes after that job leaves `waiting_input`.
+
 For daemon development, run the service in the foreground:
 
 ```bash
 ./pearl daemon run
 ```
+
+### Monitor daemon CPU and RAM
+
+The resource monitor builds and starts a daemon with its own temporary config,
+database, socket, and dummy API key. It does not connect to an installed Pearl
+daemon or use its jobs.
+
+```bash
+./testenv/monitor-daemon.sh --duration 60 --interval 1
+```
+
+Each run writes `samples.csv`, `summary.txt`, and `daemon.log` to a new directory
+under `test-results/`. The CSV records the daemon's CPU percentage and resident
+memory in KiB and MiB. Use `--duration 0` to monitor until Ctrl-C, or set a custom
+result location with `--output <directory>`.
 
 ## Start automatically
 

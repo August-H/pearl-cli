@@ -16,10 +16,11 @@ type jobsListScreen struct {
 }
 
 type jobsListLayout struct {
-	IDWidth      int
-	StatusWidth  int
-	CreatedWidth int
-	PromptWidth  int
+	IDWidth        int
+	StatusWidth    int
+	CreatedWidth   int
+	WorkspaceWidth int
+	PromptWidth    int
 }
 
 type jobsListResult struct {
@@ -28,9 +29,10 @@ type jobsListResult struct {
 }
 
 type jobsListMode struct {
-	title        string
-	allowActions bool
-	archiveJob   func(string) error
+	title         string
+	allowActions  bool
+	showWorkspace bool
+	archiveJob    func(string) error
 }
 
 func runJobsListTUI(
@@ -43,12 +45,32 @@ func runJobsListTUI(
 	})
 }
 
+func runJobsListTUIShowingWorkspace(
+	input, output *os.File,
+	jobs []store.Job,
+	archiveJob func(string) error,
+) (jobsListResult, error) {
+	return runJobsListTUIWithMode(input, output, jobs, jobsListMode{
+		title: "Pearl · all workspaces", allowActions: true,
+		showWorkspace: true, archiveJob: archiveJob,
+	})
+}
+
 func runArchivedJobsListTUI(
 	input, output *os.File,
 	jobs []store.Job,
 ) (jobsListResult, error) {
 	return runJobsListTUIWithMode(input, output, jobs, jobsListMode{
 		title: "Pearl archive",
+	})
+}
+
+func runArchivedJobsListTUIShowingWorkspace(
+	input, output *os.File,
+	jobs []store.Job,
+) (jobsListResult, error) {
+	return runJobsListTUIWithMode(input, output, jobs, jobsListMode{
+		title: "Pearl archive · all workspaces", showWorkspace: true,
 	})
 }
 
@@ -103,9 +125,9 @@ func runJobsListTUIWithMode(
 		if footer == "" {
 			footer = jobsListModeFooter(mode, jobs, selected, "q exit")
 		}
-		screen := renderJobsListScreenWithTitleAndFooter(
+		screen := renderJobsListScreenCore(
 			jobs, width, height, selected, scroll, color, "q exit", footer,
-			mode.title,
+			mode.title, mode.showWorkspace,
 		)
 		fmt.Fprint(output, "\x1b[H\x1b[2J", dashboardTerminalFrame(screen.Frame))
 		return screen
@@ -259,10 +281,40 @@ func renderJobsListScreenWithTitleAndFooter(
 	footer string,
 	title string,
 ) jobsListScreen {
+	return renderJobsListScreenCore(
+		jobs, width, height, selected, scroll, color, quitLabel, footer, title, false,
+	)
+}
+
+func renderJobsListScreenShowingWorkspace(
+	jobs []store.Job,
+	width, height, selected, scroll int,
+	color bool,
+	quitLabel string,
+	footer string,
+	title string,
+) jobsListScreen {
+	return renderJobsListScreenCore(
+		jobs, width, height, selected, scroll, color, quitLabel, footer, title, true,
+	)
+}
+
+func renderJobsListScreenCore(
+	jobs []store.Job,
+	width, height, selected, scroll int,
+	color bool,
+	quitLabel string,
+	footer string,
+	title string,
+	showWorkspace bool,
+) jobsListScreen {
 	width = max(20, width)
 	height = max(8, height)
 	bodyHeight := height - 5
 	layout := calculateJobsListLayout(width)
+	if showWorkspace {
+		layout = calculateJobsListLayoutWithWorkspace(width)
+	}
 	if len(jobs) == 0 {
 		selected, scroll = 0, 0
 	} else {
@@ -407,11 +459,25 @@ func calculateJobsListLayout(width int) jobsListLayout {
 	}
 }
 
+func calculateJobsListLayoutWithWorkspace(width int) jobsListLayout {
+	layout := calculateJobsListLayout(width)
+	if layout.CreatedWidth == 0 {
+		return layout
+	}
+	const workspaceWidth = 24
+	layout.WorkspaceWidth = workspaceWidth
+	layout.PromptWidth = max(1, layout.PromptWidth-workspaceWidth-2)
+	return layout
+}
+
 func renderJobsListHeader(layout jobsListLayout, color bool) string {
 	line := "  " + jobsListCell("ID", layout.IDWidth) + "  " +
 		jobsListCell("STATUS", layout.StatusWidth)
 	if layout.CreatedWidth > 0 {
 		line += "  " + jobsListCell("CREATED", layout.CreatedWidth)
+	}
+	if layout.WorkspaceWidth > 0 {
+		line += "  " + jobsListCell("WORKSPACE", layout.WorkspaceWidth)
 	}
 	if layout.PromptWidth > 0 {
 		line += "  " + jobsListCell("PROMPT", layout.PromptWidth)
@@ -440,6 +506,9 @@ func renderJobsListRow(
 	line := prefix + id + "  " + status
 	if layout.CreatedWidth > 0 {
 		line += "  " + jobsListCell(formatJobCreatedAt(job.CreatedAt), layout.CreatedWidth)
+	}
+	if layout.WorkspaceWidth > 0 {
+		line += "  " + jobsListCell(workspaceBoardLabel(job.WorkspaceRoot), layout.WorkspaceWidth)
 	}
 	if layout.PromptWidth > 0 {
 		line += "  " + jobsListCell(dashboardText(job.Prompt), layout.PromptWidth)

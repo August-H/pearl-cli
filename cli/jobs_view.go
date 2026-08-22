@@ -51,16 +51,31 @@ type jobViewSection struct {
 	Expanded bool
 }
 
+func parseShowAllFlag(arguments []string) (bool, []string) {
+	showAll := false
+	var rest []string
+	for _, argument := range arguments {
+		switch argument {
+		case "-a", "--all":
+			showAll = true
+		default:
+			rest = append(rest, argument)
+		}
+	}
+	return showAll, rest
+}
+
 func runJobs(args []string) int {
+	showAll, rest := parseShowAllFlag(args)
 	switch {
-	case len(args) == 0:
-		return listJobs()
-	case len(args) == 2 && args[0] == "view":
-		return viewJob(args[1])
-	case len(args) > 0 && args[0] != "view":
-		return printInvalidCommand("jobs " + args[0])
+	case len(rest) == 0:
+		return listJobs(showAll)
+	case len(rest) == 2 && rest[0] == "view":
+		return viewJob(rest[1])
+	case len(rest) > 0 && rest[0] != "view":
+		return printInvalidCommand("jobs " + rest[0])
 	default:
-		fmt.Fprintln(os.Stderr, "Usage: pearl jobs [view <job-id>]")
+		fmt.Fprintln(os.Stderr, "Usage: pearl jobs [--all] [view <job-id>]")
 		return 2
 	}
 }
@@ -127,7 +142,7 @@ func buildJobViewSections(details jobDetails) ([]jobViewSection, error) {
 	if job.FinishedAt != nil {
 		overview = append(overview, "Finished: "+formatJobCreatedAt(*job.FinishedAt))
 	}
-	if duration := jobViewDuration(job); duration != "" {
+	if duration := jobViewDuration(job, details.StatusEvents); duration != "" {
 		overview = append(overview, "Duration: "+duration)
 	}
 	overview = append(overview, "Directory: "+jobViewText(displayJobDirectory(job.WorkspaceRoot)))
@@ -148,8 +163,9 @@ func buildJobViewSections(details jobDetails) ([]jobViewSection, error) {
 		})
 	}
 	if job.Error != "" {
+		message := formatAgentError(job.Error)
 		sections = append(sections, jobViewSection{
-			Title: "Error", Summary: jobViewOneLine(job.Error), Lines: jobViewValueLines(job.Error),
+			Title: "Error", Summary: jobViewOneLine(message), Lines: jobViewValueLines(message),
 		})
 	}
 
@@ -340,7 +356,7 @@ func toolArgumentsSummary(value string) string {
 	return strings.TrimSpace(arguments.Question)
 }
 
-func jobViewDuration(job store.Job) string {
+func jobViewDuration(job store.Job, statusEvents []store.Event) string {
 	if job.StartedAt == nil {
 		return ""
 	}
@@ -348,11 +364,45 @@ func jobViewDuration(job store.Job) string {
 	if job.FinishedAt != nil {
 		end = *job.FinishedAt
 	}
-	duration := end.Sub(*job.StartedAt)
+	duration := end.Sub(*job.StartedAt) - pausedDuration(*job.StartedAt, end, statusEvents)
 	if duration < 0 {
 		duration = 0
 	}
 	return duration.Round(time.Second).String()
+}
+
+func pausedDuration(start, end time.Time, statusEvents []store.Event) time.Duration {
+	var paused time.Duration
+	var pauseStart time.Time
+	for _, event := range statusEvents {
+		if event.Type != "status" {
+			continue
+		}
+		timestamp := event.CreatedAt.Local()
+		if timestamp.Before(start) {
+			continue
+		}
+		if pauseStart.IsZero() {
+			if event.Data == store.JobWaitingInput {
+				pauseStart = timestamp
+			}
+			continue
+		}
+		if event.Data != store.JobWaitingInput {
+			paused += timestamp.Sub(pauseStart)
+			pauseStart = time.Time{}
+		}
+	}
+	if !pauseStart.IsZero() {
+		if end.Before(pauseStart) {
+			end = pauseStart
+		}
+		paused += end.Sub(pauseStart)
+	}
+	if paused < 0 {
+		return 0
+	}
+	return paused
 }
 
 func jobViewText(value string) string {

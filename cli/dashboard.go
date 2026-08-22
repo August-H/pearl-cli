@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -65,6 +66,7 @@ type dashboardCommandView struct {
 type dashboardJobsView struct {
 	open           bool
 	archived       bool
+	showAll        bool
 	selected       int
 	scroll         int
 	bodyHeight     int
@@ -84,6 +86,19 @@ type dashboardJobDetailsView struct {
 	keepSelected    bool
 }
 
+type dashboardAutonomousView struct {
+	sessionID string
+	details   store.AutonomousDetails
+	state     autonomousTUIState
+	loadErr   error
+}
+
+type dashboardAutonomousCommand struct {
+	goal     string
+	resumeID string
+	latest   bool
+}
+
 type dashboardCommandWriter struct {
 	write func(string)
 }
@@ -100,6 +115,8 @@ var dashboardCommandOptions = []dashboardCommandSuggestion{
 	{usage: "jobs", completion: "jobs", description: "List the job board"},
 	{usage: "jobs view <job-id>", completion: "jobs view ", description: "Show job details and transcript"},
 	{usage: "archive", completion: "archive", description: "List archived jobs"},
+	{usage: "autonomous <goal>", completion: "autonomous ", description: "Start an autonomous session"},
+	{usage: "autonomous --resume <session-id>", completion: "autonomous --resume ", description: "Resume an autonomous session"},
 	{usage: "job [-n name] <prompt>", completion: "job ", description: "Create a job"},
 	{usage: "job --directory [-n name] <prompt>", completion: "job --directory ", description: "Choose the job directory"},
 	{usage: "status", completion: "status", description: "Show daemon and queue status"},
@@ -126,20 +143,21 @@ var dashboardConfigureModelOptions = []dashboardCommandSuggestion{
 }
 
 var dashboardCommandDescriptions = map[string]string{
-	"run":       "Run or retry a job",
-	"configure": "Set the API key and model",
-	"jobs":      "List the job board",
-	"archive":   "List archived jobs",
-	"job":       "Create a job",
-	"status":    "Show daemon and queue status",
-	"attach":    "Stream a job's output",
-	"respond":   "Answer a paused job",
-	"cancel":    "Cancel a job",
-	"retry":     "Retry a finished job",
-	"schedule":  "Manage recurring jobs",
-	"daemon":    "Manage the background process",
-	"help":      "Show command help",
-	"exit":      "Close the dashboard",
+	"run":        "Run or retry a job",
+	"configure":  "Set the API key and model",
+	"jobs":       "List the job board",
+	"archive":    "List archived jobs",
+	"autonomous": "Open or start autonomous mode",
+	"job":        "Create a job",
+	"status":     "Show daemon and queue status",
+	"attach":     "Stream a job's output",
+	"respond":    "Answer a paused job",
+	"cancel":     "Cancel a job",
+	"retry":      "Retry a finished job",
+	"schedule":   "Manage recurring jobs",
+	"daemon":     "Manage the background process",
+	"help":       "Show command help",
+	"exit":       "Close the dashboard",
 }
 
 func runDashboard(args []string) int {
@@ -211,12 +229,14 @@ func dashboardLoop(
 	var commandWait sync.WaitGroup
 	jobsView := dashboardJobsView{}
 	var jobDetailsView *dashboardJobDetailsView
+	var autonomousView *dashboardAutonomousView
+	dashboardWorkspace := currentWorkspace()
 	var jobsLock sync.RWMutex
 	var jobs []store.Job
 	var archivedJobs []store.Job
 	var loadErr error
 	var archiveLoadErr error
-	jobSnapshot := func(archived bool) ([]store.Job, error) {
+	loadJobs := func(archived bool) ([]store.Job, error) {
 		jobsLock.RLock()
 		defer jobsLock.RUnlock()
 		if archived {
@@ -224,40 +244,86 @@ func dashboardLoop(
 		}
 		return append([]store.Job(nil), jobs...), loadErr
 	}
+	jobSnapshot := func(archived, showAll bool) ([]store.Job, error) {
+		loaded, err := loadJobs(archived)
+		if !showAll && err == nil {
+			loaded = filterJobsForWorkspace(loaded, dashboardWorkspace)
+		}
+		return loaded, err
+	}
 	draw := func(refreshJobs bool) {
 		renderLock.Lock()
 		defer renderLock.Unlock()
 		inputLock.Lock()
 		archiveOpen := jobsView.open && jobsView.archived
+		jobsShowAll := jobsView.showAll
+		autonomousID := ""
+		if autonomousView != nil {
+			autonomousID = autonomousView.sessionID
+		}
 		inputLock.Unlock()
 		if refreshJobs {
 			requestContext, cancel := context.WithTimeout(sessionContext, 2*time.Second)
-			var loadedJobs []store.Job
-			var loadedErr error
-			if archiveOpen {
-				loadedJobs, loadedErr = client.archivedJobs(requestContext)
-			} else {
-				loadedJobs, loadedErr = client.jobs(requestContext)
-			}
-			cancel()
-			jobsLock.Lock()
-			if archiveOpen {
-				if loadedErr == nil {
-					archivedJobs = loadedJobs
+			if autonomousID != "" {
+				loaded, loadedErr := client.autonomousDetails(requestContext, autonomousID)
+				cancel()
+				inputLock.Lock()
+				if autonomousView != nil && autonomousView.sessionID == autonomousID {
+					autonomousView.loadErr = loadedErr
+					if loadedErr == nil {
+						autonomousView.details = loaded
+						updateAutonomousActivity(
+							&autonomousView.state, loaded, time.Now(),
+						)
+					}
 				}
-				archiveLoadErr = loadedErr
+				inputLock.Unlock()
 			} else {
-				if loadedErr == nil {
-					jobs = loadedJobs
+				var loadedJobs []store.Job
+				var loadedErr error
+				if archiveOpen {
+					loadedJobs, loadedErr = client.archivedJobs(requestContext)
+				} else {
+					loadedJobs, loadedErr = client.jobs(requestContext)
 				}
-				loadErr = loadedErr
+				cancel()
+				jobsLock.Lock()
+				if archiveOpen {
+					if loadedErr == nil {
+						archivedJobs = loadedJobs
+					}
+					archiveLoadErr = loadedErr
+				} else {
+					if loadedErr == nil {
+						jobs = loadedJobs
+					}
+					loadErr = loadedErr
+				}
+				jobsLock.Unlock()
 			}
-			jobsLock.Unlock()
 		}
-		visibleJobs, visibleLoadErr := jobSnapshot(archiveOpen)
+		boardJobs, visibleLoadErr := loadJobs(archiveOpen)
+		visibleJobs := boardJobs
+		if jobsView.open && !jobsShowAll {
+			visibleJobs = filterJobsForWorkspace(boardJobs, dashboardWorkspace)
+		}
 		width := readWidth()
 		height := dashboardHeight(input)
 		inputLock.Lock()
+		if autonomousView != nil {
+			frame := renderAutonomousScreenWithHint(
+				autonomousView.details,
+				autonomousView.state.activity,
+				autonomousView.loadErr,
+				width,
+				height,
+				color,
+				"q back · r refresh · work continues in daemon",
+			)
+			inputLock.Unlock()
+			fmt.Fprint(output, "\x1b[H\x1b[2J", dashboardTerminalFrame(frame))
+			return
+		}
 		if jobDetailsView != nil {
 			view := *jobDetailsView
 			screen := renderJobViewScreenWithQuitLabel(
@@ -324,7 +390,14 @@ func dashboardLoop(
 			if jobsView.archived {
 				title = "Pearl archive"
 			}
-			screen := renderJobsListScreenWithTitleAndFooter(
+			if jobsShowAll {
+				title += " · all workspaces"
+			}
+			renderList := renderJobsListScreenWithTitleAndFooter
+			if jobsShowAll {
+				renderList = renderJobsListScreenShowingWorkspace
+			}
+			screen := renderList(
 				visibleJobs, width, height, jobsView.selected, jobsView.scroll,
 				color, "q back", footer, title,
 			)
@@ -426,10 +499,12 @@ func dashboardLoop(
 			escapeSequence = ""
 			inputLock.Lock()
 			snapshotArchived := jobsView.open && jobsView.archived
+			snapshotShowAll := jobsView.showAll
 			inputLock.Unlock()
-			suggestionJobs, _ := jobSnapshot(snapshotArchived)
+			suggestionJobs, _ := jobSnapshot(snapshotArchived, snapshotShowAll)
 			inputLock.Lock()
 			switch {
+			case autonomousView != nil:
 			case jobDetailsView != nil:
 				dashboardApplyJobDetailsAction(jobDetailsView, action)
 			case jobsView.open:
@@ -455,9 +530,25 @@ func dashboardLoop(
 
 		inputLock.Lock()
 		snapshotArchived := jobsView.open && jobsView.archived
+		snapshotShowAll := jobsView.showAll
 		inputLock.Unlock()
-		navigationJobs, _ := jobSnapshot(snapshotArchived)
+		navigationJobs, _ := jobSnapshot(snapshotArchived, snapshotShowAll)
 		inputLock.Lock()
+		if autonomousView != nil {
+			refreshView := false
+			switch character {
+			case 3, 4, 'q', 'Q':
+				autonomousView = nil
+				refreshView = true
+			case 'r', 'R':
+				refreshView = true
+			}
+			inputLock.Unlock()
+			if refreshView {
+				draw(true)
+			}
+			continue
+		}
 		if jobDetailsView != nil {
 			back := false
 			action := ""
@@ -527,9 +618,15 @@ func dashboardLoop(
 				continue
 			}
 			openJobID := ""
+			refreshAfterToggle := false
 			switch character {
 			case 3, 4, 'q', 'Q':
 				jobsView.open = false
+			case 'a', 'A':
+				jobsView.showAll = !jobsView.showAll
+				jobsView.selected, jobsView.scroll = 0, 0
+				jobsView.notice = ""
+				refreshAfterToggle = true
 			case 'd', 'D':
 				if !jobsView.archived && len(navigationJobs) > 0 {
 					jobsView.confirmArchive = true
@@ -580,7 +677,7 @@ func dashboardLoop(
 				}
 				inputLock.Unlock()
 			}
-			draw(false)
+			draw(refreshAfterToggle)
 			continue
 		}
 		notice = ""
@@ -723,15 +820,65 @@ func dashboardLoop(
 				notice = "Omit the pearl prefix. Type the command directly."
 			case "dashboard":
 				notice = "The dashboard is already open."
-			case "archive":
-				if len(parsed) != 1 {
-					notice = "Usage: archive"
+			case "autonomous":
+				autonomousCommand, commandErr := parseDashboardAutonomousCommand(parsed[1:])
+				if commandErr != nil {
+					notice = commandErr.Error()
 					break
 				}
 				commandText = ""
 				selectedSuggestion = 0
 				commandView = dashboardCommandView{}
-				jobsView = dashboardJobsView{open: true, archived: true}
+				inputLock.Unlock()
+
+				requestContext, cancel := context.WithTimeout(sessionContext, 5*time.Second)
+				var session store.AutonomousSession
+				var autonomousErr error
+				switch {
+				case autonomousCommand.latest:
+					session, autonomousErr = client.latestAutonomousSession(requestContext)
+				case autonomousCommand.resumeID != "":
+					var details store.AutonomousDetails
+					details, autonomousErr = client.autonomousDetails(
+						requestContext, autonomousCommand.resumeID,
+					)
+					session = details.Session
+				default:
+					workspace, workspaceErr := os.Getwd()
+					if workspaceErr != nil {
+						autonomousErr = workspaceErr
+					} else {
+						session, autonomousErr = client.createAutonomousSession(
+							requestContext, autonomousCommand.goal, workspace,
+						)
+					}
+				}
+				cancel()
+
+				inputLock.Lock()
+				if autonomousErr != nil {
+					notice = "Autonomous: " + autonomousErr.Error()
+				} else {
+					autonomousView = &dashboardAutonomousView{
+						sessionID: session.ID,
+						state: autonomousTUIState{
+							jobStatuses: make(map[string]string),
+						},
+					}
+				}
+				inputLock.Unlock()
+				draw(true)
+				continue
+			case "archive":
+				showAll, rest := parseShowAllFlag(parsed[1:])
+				if len(rest) != 0 {
+					notice = "Usage: archive [--all]"
+					break
+				}
+				commandText = ""
+				selectedSuggestion = 0
+				commandView = dashboardCommandView{}
+				jobsView = dashboardJobsView{open: true, archived: true, showAll: showAll}
 				inputLock.Unlock()
 				draw(true)
 				continue
@@ -742,6 +889,14 @@ func dashboardLoop(
 					selectedSuggestion = 0
 					commandView = dashboardCommandView{}
 					jobsView = dashboardJobsView{open: true}
+					inputLock.Unlock()
+					draw(true)
+					continue
+				case len(parsed) == 2 && (parsed[1] == "--all" || parsed[1] == "-a"):
+					commandText = ""
+					selectedSuggestion = 0
+					commandView = dashboardCommandView{}
+					jobsView = dashboardJobsView{open: true, showAll: true}
 					inputLock.Unlock()
 					draw(true)
 					continue
@@ -1365,6 +1520,32 @@ func parseDashboardCommand(value string) ([]string, error) {
 	}
 	flush()
 	return arguments, nil
+}
+
+func parseDashboardAutonomousCommand(
+	arguments []string,
+) (dashboardAutonomousCommand, error) {
+	if len(arguments) == 0 {
+		return dashboardAutonomousCommand{latest: true}, nil
+	}
+	if arguments[0] == "--resume" {
+		if len(arguments) != 2 || strings.TrimSpace(arguments[1]) == "" {
+			return dashboardAutonomousCommand{}, errors.New(
+				"Usage: autonomous --resume <session-id>",
+			)
+		}
+		return dashboardAutonomousCommand{resumeID: strings.TrimSpace(arguments[1])}, nil
+	}
+	if strings.HasPrefix(arguments[0], "-") {
+		return dashboardAutonomousCommand{}, errors.New(
+			"Usage: autonomous [--resume <session-id>] [\"goal\"]",
+		)
+	}
+	goal := strings.TrimSpace(strings.Join(arguments, " "))
+	if goal == "" {
+		return dashboardAutonomousCommand{}, errors.New("Autonomous goal cannot be empty.")
+	}
+	return dashboardAutonomousCommand{goal: goal}, nil
 }
 
 func renderDashboard(

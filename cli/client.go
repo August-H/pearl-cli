@@ -27,6 +27,7 @@ type jobDetails struct {
 	Job            store.Job             `json:"job"`
 	Transcript     []byte                `json:"transcript,omitempty"`
 	ToolExecutions []store.ToolExecution `json:"tool_executions"`
+	StatusEvents   []store.Event         `json:"status_events"`
 }
 
 func newDaemonClient() (*daemonClient, error) {
@@ -110,6 +111,36 @@ func (c *daemonClient) archivedJobs(ctx context.Context) ([]store.Job, error) {
 	var jobs []store.Job
 	err := c.request(ctx, http.MethodGet, "/v1/archive", nil, &jobs)
 	return jobs, err
+}
+
+func (c *daemonClient) createAutonomousSession(
+	ctx context.Context,
+	goal, workspace string,
+) (store.AutonomousSession, error) {
+	var session store.AutonomousSession
+	err := c.request(ctx, http.MethodPost, "/v1/autonomous", map[string]string{
+		"goal": goal, "workspace_root": workspace,
+	}, &session)
+	return session, err
+}
+
+func (c *daemonClient) latestAutonomousSession(
+	ctx context.Context,
+) (store.AutonomousSession, error) {
+	var session store.AutonomousSession
+	err := c.request(ctx, http.MethodGet, "/v1/autonomous", nil, &session)
+	return session, err
+}
+
+func (c *daemonClient) autonomousDetails(
+	ctx context.Context,
+	id string,
+) (store.AutonomousDetails, error) {
+	var details store.AutonomousDetails
+	err := c.request(
+		ctx, http.MethodGet, "/v1/autonomous/"+url.PathEscape(id), nil, &details,
+	)
+	return details, err
 }
 
 func (c *daemonClient) job(ctx context.Context, id string) (store.Job, error) {

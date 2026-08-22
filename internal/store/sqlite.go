@@ -93,6 +93,29 @@ CREATE TABLE IF NOT EXISTS schedules (
     created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS schedules_due ON schedules(enabled, next_run_at);
+
+CREATE TABLE IF NOT EXISTS autonomous_sessions (
+    id TEXT PRIMARY KEY,
+    goal TEXT NOT NULL,
+    workspace_root TEXT NOT NULL,
+    status TEXT NOT NULL,
+    summary TEXT NOT NULL DEFAULT '',
+    error TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    finished_at TEXT
+);
+CREATE INDEX IF NOT EXISTS autonomous_sessions_status
+ON autonomous_sessions(status, updated_at);
+
+CREATE TABLE IF NOT EXISTS autonomous_jobs (
+    session_id TEXT NOT NULL REFERENCES autonomous_sessions(id) ON DELETE CASCADE,
+    job_id TEXT NOT NULL UNIQUE REFERENCES jobs(id) ON DELETE CASCADE,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY(session_id, job_id)
+);
+CREATE INDEX IF NOT EXISTS autonomous_jobs_session
+ON autonomous_jobs(session_id, created_at);
 `
 	if _, err := s.db.ExecContext(ctx, schema); err != nil {
 		return err

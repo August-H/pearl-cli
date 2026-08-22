@@ -19,21 +19,25 @@ import (
 	"golang.org/x/term"
 )
 
+const version = "0.1.0"
+
 const usage = `Pearl CLI
 
 Usage:
   pearl job [-d] [-n name] "prompt"                        Create a pending job
   pearl run [--detach] <job-id>                            Run or retry a job
   pearl configure                                          Set the API key and model
-  pearl jobs                                               List the job board
+  pearl jobs [--all]                                       List jobs for this directory
     view <job-id>                                           Show job details and transcript
-  pearl archive                                            List archived jobs
+  pearl archive [--all]                                    List archived jobs
   pearl dashboard                                          Watch and control active jobs
   pearl attach <job-id>                                    Stream a job's output
   pearl respond <job-id> "answer"                          Answer a paused job and resume it
   pearl cancel <job-id>                                    Cancel a job
   pearl retry <job-id>                                     Retry a finished job and stream its output
   pearl status                                             Show daemon and queue status
+  pearl version                                            Show the Pearl version
+  pearl autonomous [--resume <session-id>] ["goal"]        Run or resume an autonomous session TUI
 
   pearl schedule                                           Manage recurring jobs
     add --every <duration> [--name name] "prompt"           Run a prompt on an interval in this workspace
@@ -67,6 +71,14 @@ func Run(args []string) int {
 		fmt.Println(usage)
 		return 0
 	}
+	if args[0] == "version" || args[0] == "-v" || args[0] == "--version" {
+		if len(args) != 1 {
+			fmt.Fprintln(os.Stderr, "Usage: pearl version")
+			return 2
+		}
+		fmt.Println("pearl version " + version)
+		return 0
+	}
 
 	switch args[0] {
 	case "configure":
@@ -82,13 +94,16 @@ func Run(args []string) int {
 	case "jobs":
 		return runJobs(args[1:])
 	case "archive":
-		if len(args) != 1 {
-			fmt.Fprintln(os.Stderr, "Usage: pearl archive")
+		showAll, rest := parseShowAllFlag(args[1:])
+		if len(rest) != 0 {
+			fmt.Fprintln(os.Stderr, "Usage: pearl archive [--all]")
 			return 2
 		}
-		return listArchivedJobs()
+		return listArchivedJobs(showAll)
 	case "dashboard":
 		return runDashboard(args[1:])
+	case "autonomous":
+		return runAutonomous(args[1:])
 	case "attach":
 		if len(args) != 2 {
 			fmt.Fprintln(os.Stderr, "Usage: pearl attach <job-id>")
@@ -377,8 +392,11 @@ func attachWithClientAfter(client *daemonClient, jobID string, after int64) int 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	currentSection := ""
+	live := false
 	err := client.streamEvents(ctx, jobID, after, func(event store.Event) error {
 		switch event.Type {
+		case "live":
+			live = true
 		case "reasoning", "answer":
 			if currentSection != event.Type {
 				if currentSection != "" {
@@ -409,7 +427,15 @@ func attachWithClientAfter(client *daemonClient, jobID string, after int64) int 
 			}
 			fmt.Printf("[user input]\n%s\n", event.Data)
 		case "error":
-			fmt.Fprintln(os.Stderr, "Agent error:", event.Data)
+			if !live {
+				return nil
+			}
+			if currentSection != "" {
+				fmt.Println()
+				currentSection = ""
+			}
+			fmt.Fprintln(os.Stderr, "Agent error:", formatAgentError(event.Data))
+			return nil
 		}
 		return nil
 	})
@@ -431,14 +457,14 @@ func attachWithClientAfter(client *daemonClient, jobID string, after int64) int 
 		return 0
 	}
 	if job.Error != "" {
-		fmt.Fprintln(os.Stderr, "Job", job.Status+":", job.Error)
+		fmt.Fprintln(os.Stderr, "Job", job.Status+":", formatAgentError(job.Error))
 	} else {
 		fmt.Fprintln(os.Stderr, "Job status:", job.Status)
 	}
 	return 1
 }
 
-func listJobs() int {
+func listJobs(showAll bool) int {
 	client, err := newDaemonClient()
 	if err != nil {
 		return printError("Jobs", err)
@@ -447,8 +473,15 @@ func listJobs() int {
 	if err != nil {
 		return printError("Jobs", err)
 	}
+	if !showAll {
+		jobs = filterJobsForWorkspace(jobs, currentWorkspace())
+	}
 	if term.IsTerminal(int(os.Stdin.Fd())) && term.IsTerminal(int(os.Stdout.Fd())) {
-		selection, err := runJobsListTUI(
+		listTUI := runJobsListTUI
+		if showAll {
+			listTUI = runJobsListTUIShowingWorkspace
+		}
+		selection, err := listTUI(
 			os.Stdin, os.Stdout, jobs,
 			func(jobID string) error {
 				requestContext, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -473,20 +506,27 @@ func listJobs() int {
 	color := os.Getenv("NO_COLOR") == "" && os.Getenv("TERM") != "dumb" &&
 		term.IsTerminal(int(os.Stdout.Fd()))
 	writer := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', tabwriter.StripEscape)
-	fmt.Fprintf(writer, "ID\t%s\tCREATED\tPROMPT\n",
+	header := "ID\t%s\tCREATED\t"
+	if showAll {
+		header += "WORKSPACE\t"
+	}
+	fmt.Fprintf(writer, header+"PROMPT\n",
 		jobBoardPaint(color, ansiBold+ansiCyan, "STATUS"))
 	for _, job := range jobs {
 		prompt := jobBoardText(job.Prompt)
-		fmt.Fprintf(writer, "%s\t%s\t%s\t%s\n", job.ID,
+		row := fmt.Sprintf("%s\t%s\t%s\t", job.ID,
 			jobBoardStatus(job.Status, color),
-			formatJobCreatedAt(job.CreatedAt),
-			prompt)
+			formatJobCreatedAt(job.CreatedAt))
+		if showAll {
+			row += workspaceBoardLabel(job.WorkspaceRoot) + "\t"
+		}
+		fmt.Fprintf(writer, row+"%s\n", prompt)
 	}
 	_ = writer.Flush()
 	return 0
 }
 
-func listArchivedJobs() int {
+func listArchivedJobs(showAll bool) int {
 	client, err := newDaemonClient()
 	if err != nil {
 		return printError("Archive", err)
@@ -495,8 +535,15 @@ func listArchivedJobs() int {
 	if err != nil {
 		return printError("Archive", err)
 	}
+	if !showAll {
+		jobs = filterJobsForWorkspace(jobs, currentWorkspace())
+	}
 	if term.IsTerminal(int(os.Stdin.Fd())) && term.IsTerminal(int(os.Stdout.Fd())) {
-		selection, err := runArchivedJobsListTUI(os.Stdin, os.Stdout, jobs)
+		listTUI := runArchivedJobsListTUI
+		if showAll {
+			listTUI = runArchivedJobsListTUIShowingWorkspace
+		}
+		selection, err := listTUI(os.Stdin, os.Stdout, jobs)
 		if err != nil {
 			return printError("Archive", err)
 		}
@@ -508,13 +555,20 @@ func listArchivedJobs() int {
 	color := os.Getenv("NO_COLOR") == "" && os.Getenv("TERM") != "dumb" &&
 		term.IsTerminal(int(os.Stdout.Fd()))
 	writer := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', tabwriter.StripEscape)
-	fmt.Fprintf(writer, "ID\t%s\tCREATED\tPROMPT\n",
+	header := "ID\t%s\tCREATED\t"
+	if showAll {
+		header += "WORKSPACE\t"
+	}
+	fmt.Fprintf(writer, header+"PROMPT\n",
 		jobBoardPaint(color, ansiBold+ansiCyan, "STATUS"))
 	for _, job := range jobs {
-		fmt.Fprintf(writer, "%s\t%s\t%s\t%s\n", job.ID,
+		row := fmt.Sprintf("%s\t%s\t%s\t", job.ID,
 			jobBoardStatus(job.Status, color),
-			formatJobCreatedAt(job.CreatedAt),
-			jobBoardText(job.Prompt))
+			formatJobCreatedAt(job.CreatedAt))
+		if showAll {
+			row += workspaceBoardLabel(job.WorkspaceRoot) + "\t"
+		}
+		fmt.Fprintf(writer, row+"%s\n", jobBoardText(job.Prompt))
 	}
 	_ = writer.Flush()
 	return 0
@@ -555,8 +609,9 @@ func jobBoardPaint(enabled bool, code, value string) string {
 
 func jobBoardText(value string) string {
 	value = strings.ReplaceAll(value, "\n", " ")
-	if len(value) > 60 {
-		return value[:57] + "..."
+	runes := []rune(value)
+	if len(runes) > 60 {
+		return string(runes[:57]) + "..."
 	}
 	return value
 }

@@ -360,8 +360,31 @@ func (s *Store) RequestCancel(ctx context.Context, id string) (Job, error) {
 	if err := rejectArchivedJob(job); err != nil {
 		return Job{}, err
 	}
-	if job.Terminal() {
+	if job.Terminal() && job.Status != JobPending {
 		return job, nil
+	}
+
+	if job.Status == JobPending {
+		finished := time.Now().UTC()
+		result, err := transaction.ExecContext(ctx, `
+UPDATE jobs SET status = ?, finished_at = ? WHERE id = ? AND status = ?`,
+			JobCancelled, finished.Format(time.RFC3339Nano), id, JobPending)
+		if err != nil {
+			return Job{}, err
+		}
+		affected, err := result.RowsAffected()
+		if err != nil {
+			return Job{}, err
+		}
+		if affected != 1 {
+			return Job{}, fmt.Errorf("job %q was not cancelled", id)
+		}
+		job.Status = JobCancelled
+		job.FinishedAt = &finished
+		if _, err := appendEventTx(ctx, transaction, id, "status", JobCancelled); err != nil {
+			return Job{}, err
+		}
+		return job, transaction.Commit()
 	}
 
 	if job.Status == JobQueued || job.Status == JobWaitingInput {
@@ -635,6 +658,30 @@ func (s *Store) EventsAfter(ctx context.Context, jobID string, sequence int64, l
 	rows, err := s.db.QueryContext(ctx, `
 SELECT sequence, job_id, type, data, created_at FROM events
 WHERE job_id = ? AND sequence > ? ORDER BY sequence LIMIT ?`, jobID, sequence, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var events []Event
+	for rows.Next() {
+		var event Event
+		var created string
+		if err := rows.Scan(&event.Sequence, &event.JobID, &event.Type, &event.Data, &created); err != nil {
+			return nil, err
+		}
+		event.CreatedAt, err = parseTime(created)
+		if err != nil {
+			return nil, err
+		}
+		events = append(events, event)
+	}
+	return events, rows.Err()
+}
+
+func (s *Store) StatusTransitions(ctx context.Context, jobID string) ([]Event, error) {
+	rows, err := s.db.QueryContext(ctx, `
+SELECT sequence, job_id, type, data, created_at FROM events
+WHERE job_id = ? AND type = 'status' ORDER BY sequence`, jobID)
 	if err != nil {
 		return nil, err
 	}

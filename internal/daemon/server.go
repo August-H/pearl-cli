@@ -19,10 +19,11 @@ import (
 )
 
 type Server struct {
-	store   *store.Store
-	manager *Manager
-	cancel  context.CancelFunc
-	started time.Time
+	store      *store.Store
+	manager    *Manager
+	autonomous *AutonomousManager
+	cancel     context.CancelFunc
+	started    time.Time
 }
 
 type submitRequest struct {
@@ -42,6 +43,11 @@ type respondRequest struct {
 	Response string `json:"response"`
 }
 
+type autonomousRequest struct {
+	Goal          string `json:"goal"`
+	WorkspaceRoot string `json:"workspace_root"`
+}
+
 type jobActionResponse struct {
 	store.Job
 	EventSequence int64 `json:"event_sequence"`
@@ -51,6 +57,7 @@ type jobDetailsResponse struct {
 	Job            store.Job             `json:"job"`
 	Transcript     []byte                `json:"transcript,omitempty"`
 	ToolExecutions []store.ToolExecution `json:"tool_executions"`
+	StatusEvents   []store.Event         `json:"status_events,omitempty"`
 }
 
 func Run(ctx context.Context, paths pearlpaths.Paths, runner AgentRunner) error {
@@ -79,7 +86,14 @@ func Run(ctx context.Context, paths pearlpaths.Paths, runner AgentRunner) error 
 	defer cancel()
 	manager := NewManager(state, runner)
 	manager.Start(runtimeContext)
-	server := &Server{store: state, manager: manager, cancel: cancel, started: time.Now().UTC()}
+	autonomous := NewAutonomousManager(
+		state, manager, OpenRouterAutonomousRunner{},
+	)
+	autonomous.Start(runtimeContext)
+	server := &Server{
+		store: state, manager: manager, autonomous: autonomous,
+		cancel: cancel, started: time.Now().UTC(),
+	}
 	httpServer := &http.Server{
 		Handler:           server.routes(),
 		ReadHeaderTimeout: 10 * time.Second,
@@ -98,6 +112,7 @@ func Run(ctx context.Context, paths pearlpaths.Paths, runner AgentRunner) error 
 	_ = httpServer.Shutdown(shutdownContext)
 	shutdownCancel()
 	manager.Wait()
+	autonomous.Wait()
 	if serveErr != nil && !errors.Is(serveErr, http.ErrServerClosed) {
 		return serveErr
 	}
@@ -139,10 +154,78 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("/v1/jobs", s.handleJobs)
 	mux.HandleFunc("/v1/jobs/", s.handleJob)
 	mux.HandleFunc("/v1/archive", s.handleArchive)
+	mux.HandleFunc("/v1/autonomous", s.handleAutonomous)
+	mux.HandleFunc("/v1/autonomous/", s.handleAutonomousSession)
 	mux.HandleFunc("/v1/schedules", s.handleSchedules)
 	mux.HandleFunc("/v1/schedules/", s.handleSchedule)
 	mux.HandleFunc("/v1/shutdown", s.handleShutdown)
 	return mux
+}
+
+func (s *Server) handleAutonomous(writer http.ResponseWriter, request *http.Request) {
+	switch request.Method {
+	case http.MethodPost:
+		var input autonomousRequest
+		if err := decodeJSON(request, &input); err != nil {
+			writeError(writer, http.StatusBadRequest, err)
+			return
+		}
+		input.Goal = strings.TrimSpace(input.Goal)
+		if input.Goal == "" {
+			writeError(writer, http.StatusBadRequest, errors.New("goal cannot be empty"))
+			return
+		}
+		if len(input.Goal) > autonomousPromptLimit {
+			writeError(writer, http.StatusBadRequest, fmt.Errorf(
+				"goal exceeds %d bytes", autonomousPromptLimit,
+			))
+			return
+		}
+		workspace, err := validateWorkspace(input.WorkspaceRoot)
+		if err != nil {
+			writeError(writer, http.StatusBadRequest, err)
+			return
+		}
+		session, err := s.store.CreateAutonomousSession(
+			request.Context(), input.Goal, workspace,
+		)
+		if err != nil {
+			writeError(writer, http.StatusBadRequest, err)
+			return
+		}
+		s.autonomous.Wake()
+		writeJSON(writer, http.StatusAccepted, session)
+	case http.MethodGet:
+		session, err := s.store.LatestAutonomousSession(request.Context())
+		if err != nil {
+			writeError(writer, http.StatusNotFound, err)
+			return
+		}
+		writeJSON(writer, http.StatusOK, session)
+	default:
+		methodNotAllowed(writer)
+	}
+}
+
+func (s *Server) handleAutonomousSession(
+	writer http.ResponseWriter,
+	request *http.Request,
+) {
+	if request.Method != http.MethodGet {
+		methodNotAllowed(writer)
+		return
+	}
+	id := strings.Trim(strings.TrimPrefix(request.URL.Path, "/v1/autonomous/"), "/")
+	if id == "" || strings.Contains(id, "/") {
+		http.NotFound(writer, request)
+		return
+	}
+	details, err := s.store.AutonomousDetails(request.Context(), id)
+	if err != nil {
+		writeError(writer, http.StatusNotFound, err)
+		return
+	}
+	writeJSON(writer, http.StatusOK, details)
 }
 
 func (s *Server) handleArchive(writer http.ResponseWriter, request *http.Request) {
@@ -287,10 +370,16 @@ func (s *Server) handleJob(writer http.ResponseWriter, request *http.Request) {
 			writeError(writer, http.StatusInternalServerError, err)
 			return
 		}
+		statusEvents, err := s.store.StatusTransitions(request.Context(), jobID)
+		if err != nil {
+			writeError(writer, http.StatusInternalServerError, err)
+			return
+		}
 		writeJSON(writer, http.StatusOK, jobDetailsResponse{
 			Job:            job,
 			Transcript:     transcript,
 			ToolExecutions: toolExecutions,
+			StatusEvents:   statusEvents,
 		})
 	case "run":
 		if request.Method != http.MethodPost {
@@ -384,6 +473,7 @@ func (s *Server) streamEvents(writer http.ResponseWriter, request *http.Request,
 	sequence, _ := strconv.ParseInt(request.URL.Query().Get("after"), 10, 64)
 	ticker := time.NewTicker(200 * time.Millisecond)
 	defer ticker.Stop()
+	liveMarked := false
 	for {
 		events, err := s.store.EventsAfter(request.Context(), jobID, sequence, 200)
 		if err != nil {
@@ -397,6 +487,13 @@ func (s *Server) streamEvents(writer http.ResponseWriter, request *http.Request,
 			sequence = event.Sequence
 		}
 		if len(events) > 0 {
+			flusher.Flush()
+		}
+		if !liveMarked && len(events) < 200 {
+			liveMarked = true
+			if _, err := fmt.Fprint(writer, "data: {\"type\":\"live\"}\n\n"); err != nil {
+				return
+			}
 			flusher.Flush()
 		}
 		job, err := s.store.GetJob(request.Context(), jobID)
