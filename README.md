@@ -16,14 +16,31 @@ Pearl is an agent task manager. You can assign work as jobs, close the terminal,
 Pearl only calls the model while a job is running. An idle daemon does not use
 model tokens.
 
-## Quick start guide
+## Install
 
-You need Go and an OpenRouter API key. From the repository root, build Pearl and
-run the setup wizard:
+One command installs the latest release binary, verifies its checksum, and
+prepares your PATH. No compiler or repository clone needed.
+
+macOS and Linux:
 
 ```bash
-go build -o pearl ./cmd/pearl
-./pearl configure
+curl -fsSL https://raw.githubusercontent.com/August-H/pearl-cli/main/install.sh | sh
+```
+
+Windows (PowerShell):
+
+```powershell
+irm https://raw.githubusercontent.com/August-H/pearl-cli/main/install.ps1 | iex
+```
+
+The macOS and Linux script installs to `~/.local/bin` and tells you how to add
+it to `PATH` if needed. The Windows script installs to `%USERPROFILE%\bin` and
+adds that directory to your user PATH automatically.
+
+Then run the setup wizard and enter your OpenRouter API key:
+
+```bash
+pearl configure
 ```
 
 Choose `free` to use `openrouter/free`, or choose `custom` and enter an
@@ -32,7 +49,7 @@ OpenRouter model ID.
 Open the dashboard:
 
 ```bash
-./pearl
+pearl
 ```
 
 Commands entered in the dashboard omit the `pearl` prefix. Create your first
@@ -51,69 +68,38 @@ tool activity.
 The same workflow works without the dashboard:
 
 ```bash
-./pearl job -n "fix tests" "inspect this repository and fix the failing tests"
-./pearl run "fix tests"
-./pearl jobs
+pearl job -n "fix tests" "inspect this repository and fix the failing tests"
+pearl run "fix tests"
+pearl jobs
 ```
 
 For a larger goal, start autonomous mode from the project directory:
 
 ```bash
-./pearl autonomous "audit the release, fix the problems you find, and verify the result"
+pearl autonomous "audit the release, fix the problems you find, and verify the result"
 ```
 
 Pearl opens a live TUI and keeps the coordinator in the daemon. Press `q` to
 detach. The session and its child jobs continue running.
 
-## Add Pearl to PATH
+### Build from source
 
-Adding the compiled binary to `PATH` lets you run `pearl` from any directory
-instead of typing `./pearl` or its full path.
+You need Go and a C toolchain (SQLite uses cgo). From the repository root:
 
-### macOS
+```bash
+make install
+```
 
-Install Pearl in a user-owned binary directory:
+`make install` embeds the version, commit, and build date into the binary and
+places it in `$(go env GOPATH)/bin`. Plain `go build -o pearl ./cmd/pearl`
+still works but produces a binary that reports `version dev`.
+
+To place the binary somewhere specific instead:
 
 ```bash
 mkdir -p "$HOME/.local/bin"
 install -m 755 ./pearl "$HOME/.local/bin/pearl"
 ```
-
-Add this line to `~/.zshrc`:
-
-```bash
-export PATH="$HOME/.local/bin:$PATH"
-```
-
-Reload the shell and check the installation:
-
-```bash
-source "$HOME/.zshrc"
-pearl --help
-```
-
-### Windows
-
-Build the Windows executable, copy it into a user-owned directory, and add that
-directory to the user PATH. Run these commands in PowerShell:
-
-```powershell
-go build -o pearl.exe ./cmd/pearl
-$PearlBin = Join-Path $HOME "bin"
-New-Item -ItemType Directory -Force -Path $PearlBin | Out-Null
-Copy-Item .\pearl.exe (Join-Path $PearlBin "pearl.exe")
-
-[string]$UserPath = [Environment]::GetEnvironmentVariable("Path", "User")
-if (($UserPath -split ";") -notcontains $PearlBin) {
-    $NewPath = if ($UserPath) { "$UserPath;$PearlBin" } else { $PearlBin }
-    [Environment]::SetEnvironmentVariable("Path", $NewPath, "User")
-}
-
-$env:Path = "$env:Path;$PearlBin"
-pearl --help
-```
-
-New terminals will pick up the saved PATH automatically.
 
 ## Configuration and storage
 
@@ -131,8 +117,8 @@ same wizard runs inside the dashboard command box when you enter `configure`.
 Create a job from the directory Pearl should work in, then run it by ID:
 
 ```bash
-./pearl job -n "fix tests" "inspect this repository and fix the tests"
-./pearl run "fix tests"
+pearl job -n "fix tests" "inspect this repository and fix the tests"
+pearl run "fix tests"
 ```
 
 `pearl job` saves the prompt with a `pending` status and does not run it.
@@ -147,27 +133,27 @@ system folder dialog. Windows uses its PowerShell folder browser. Linux uses
 Zenity or KDialog when either is installed.
 
 ```bash
-./pearl job --directory -n "fix docs" "update the documentation"
+pearl job --directory -n "fix docs" "update the documentation"
 ```
 
 The durable queue, schedules, and daemon lifecycle remain available as advanced
 operations:
 
 ```bash
-./pearl
-./pearl help
-./pearl job -n "login fix" "fix the login flow"
-./pearl run --detach "login fix"
-./pearl jobs
-./pearl jobs view "login fix"
-./pearl archive
-./pearl dashboard
-./pearl attach <job-id>
-./pearl respond <job-id> "your answer"
-./pearl cancel <job-id>
-./pearl retry <job-id>
-./pearl autonomous "goal"
-./pearl autonomous --resume <session-id>
+pearl
+pearl help
+pearl job -n "login fix" "fix the login flow"
+pearl run --detach "login fix"
+pearl jobs
+pearl jobs view "login fix"
+pearl archive
+pearl dashboard
+pearl attach <job-id>
+pearl respond <job-id> "your answer"
+pearl cancel <job-id>
+pearl retry <job-id>
+pearl autonomous "goal"
+pearl autonomous --resume <session-id>
 ```
 
 Running `pearl` without a command opens the dashboard.
@@ -201,6 +187,30 @@ is never hidden.
 `Ctrl-C` detaches the current terminal from an attached job; it does not cancel
 the job. Use `pearl cancel` when cancellation is intended.
 
+## Updating Pearl
+
+```bash
+pearl update --check   # show the latest release without installing
+pearl update           # download, verify, and install the latest release
+```
+
+`pearl update` fetches the newest release from the GitHub repository, verifies
+its SHA-256 checksum against a companion `.sha256` asset, and swaps the binary
+atomically. The previous executable is kept next to the new one as `pearl.old`
+for rollback. After installing, Pearl restarts an idle daemon so it picks up
+the new version; if a job is running, it prints the `pearl daemon restart`
+command to run once the queue is quiet.
+
+Builds made without release metadata (plain `go build`, commit-pinned builds)
+report no comparable version and refuse to self-update unless `--force` is
+given.
+
+Releases are cut by pushing a tag such as `v0.2.0`. The GitHub Actions release
+workflow builds binaries for darwin (arm64, amd64), linux (amd64, arm64), and
+windows (amd64) with their SHA-256 checksums and attaches them to the release.
+The Makefile embeds the same version, commit, and date locally via
+`make build` or `make install`.
+
 `pearl dashboard` opens a live terminal view of running, queued, and
 `waiting_input` jobs from every workspace. Type any Pearl command at the prompt
 without the `pearl` prefix, such as `cancel <job-id>` or `respond <job-id>
@@ -221,7 +231,7 @@ the job in the `waiting_input` state. The question appears in the attached
 output. Respond and resume the same job with:
 
 ```bash
-./pearl respond <job-id> "your answer"
+pearl respond <job-id> "your answer"
 ```
 
 The response is added to the saved agent transcript, so the resumed run keeps
@@ -254,7 +264,7 @@ The coordinator resumes after that job leaves `waiting_input`.
 For daemon development, run the service in the foreground:
 
 ```bash
-./pearl daemon run
+pearl daemon run
 ```
 
 ### Monitor daemon CPU and RAM
@@ -278,8 +288,8 @@ Install and start a per-user launchd service on macOS or systemd user service
 on Linux:
 
 ```bash
-./pearl daemon install
-./pearl daemon restart
+pearl daemon install
+pearl daemon restart
 ```
 
 The service starts at login and restarts after an unsuccessful exit. A clean
@@ -288,7 +298,7 @@ The service starts at login and restarts after an unsuccessful exit. A clean
 Remove the service with:
 
 ```bash
-./pearl daemon uninstall
+pearl daemon uninstall
 ```
 
 An asleep or powered-off laptop cannot execute jobs. Run Pearl on an always-on
@@ -299,9 +309,9 @@ machine if wall-clock 24/7 execution is required.
 Interval schedules persist in SQLite and enqueue normal jobs when due:
 
 ```bash
-./pearl schedule add --every 30m --name repository-check "inspect the repository for regressions"
-./pearl schedule list
-./pearl schedule remove <schedule-id>
+pearl schedule add --every 30m --name repository-check "inspect the repository for regressions"
+pearl schedule list
+pearl schedule remove <schedule-id>
 ```
 
 A schedule captures the working directory in which it was created. Scheduled

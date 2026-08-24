@@ -1,0 +1,80 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    strategy:
+      matrix:
+        include:
+          # Native builds: the runner toolchain compiles SQLite directly.
+          - os: macos-14 # Apple silicon
+            goos: darwin
+            goarch: arm64
+            packages: ""
+            cc: ""
+          - os: macos-13 # Last Intel runner
+            goos: darwin
+            goarch: amd64
+            packages: ""
+            cc: ""
+          - os: ubuntu-latest
+            goos: linux
+            goarch: amd64
+            packages: ""
+            cc: ""
+          # Cross builds: install a C cross-toolchain for mattn/go-sqlite3.
+          - os: ubuntu-latest
+            goos: linux
+            goarch: arm64
+            packages: gcc-aarch64-linux-gnu
+            cc: aarch64-linux-gnu-gcc
+          - os: ubuntu-latest
+            goos: windows
+            goarch: amd64
+            packages: gcc-mingw-w64-x86-64
+            cc: x86_64-w64-mingw32-gcc
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Install C cross-toolchain
+        if: matrix.packages != ''
+        run: sudo apt-get update && sudo apt-get install -y "${{ matrix.packages }}"
+
+      - name: Build
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: "1"
+          CC: ${{ matrix.cc }}
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          COMMIT="$(git rev-parse --short HEAD)"
+          DATE="$(date -u +%Y-%m-%d)"
+          EXT=""
+          [ "$GOOS" = "windows" ] && EXT=".exe"
+          ASSET="pearl-${GOOS}-${GOARCH}${EXT}"
+          go build -trimpath \
+            -ldflags "-s -w \
+              -X github.com/August-H/pearl-cli/cli.version=${VERSION} \
+              -X github.com/August-H/pearl-cli/cli.commit=${COMMIT} \
+              -X github.com/August-H/pearl-cli/cli.date=${DATE}" \
+            -o "$ASSET" ./cmd/pearl
+          sha256sum "$ASSET" > "$ASSET.sha256"
+          cat "$ASSET.sha256"
+
+      - name: Upload release assets
+        uses: softprops/action-gh-release@v2
+        with:
+          files: pearl-*
