@@ -19,7 +19,12 @@ import (
 	"golang.org/x/term"
 )
 
-const version = "0.1.0"
+// Injected at build time with -ldflags "-X github.com/August-H/pearl-cli/cli.version=..."
+var (
+	version = "dev"
+	commit  = "none"
+	date    = "unknown"
+)
 
 const usage = `Pearl CLI
 
@@ -36,6 +41,7 @@ Usage:
   pearl cancel <job-id>                                    Cancel a job
   pearl retry <job-id>                                     Retry a finished job and stream its output
   pearl status                                             Show daemon and queue status
+  pearl update [--check]                                   Update Pearl to the latest release
   pearl version                                            Show the Pearl version
   pearl autonomous [--resume <session-id>] ["goal"]        Run or resume an autonomous session TUI
 
@@ -77,6 +83,9 @@ func Run(args []string) int {
 			return 2
 		}
 		fmt.Println("pearl version " + version)
+		if commit != "none" {
+			fmt.Printf("commit %s, built %s\n", commit, date)
+		}
 		return 0
 	}
 
@@ -124,6 +133,8 @@ func Run(args []string) int {
 		return changeJob(args[1], args[0])
 	case "schedule":
 		return runSchedule(args[1:])
+	case "update":
+		return runUpdate(args[1:])
 	default:
 		return printInvalidCommand(args[0])
 	}
