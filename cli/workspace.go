@@ -1,12 +1,28 @@
 package cli
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 
 	"github.com/August-H/pearl-cli/internal/store"
 )
+
+func explicitWorkspace(path string) (string, error) {
+	absolute, err := filepath.Abs(path)
+	if err != nil {
+		return "", err
+	}
+	info, err := os.Stat(absolute)
+	if err != nil {
+		return "", err
+	}
+	if !info.IsDir() {
+		return "", fmt.Errorf("workspace %q is not a directory", absolute)
+	}
+	return resolveWorkspacePath(absolute), nil
+}
 
 func currentWorkspace() string {
 	directory, err := os.Getwd()

@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/August-H/pearl-cli/agent_functions"
+	"github.com/August-H/pearl-cli/internal/workspacepath"
 )
 
 const openRouterChatURL = "https://openrouter.ai/api/v1/chat/completions"
@@ -64,7 +65,8 @@ type reasoningDetailText struct {
 
 type agentStreamChunk struct {
 	Choices []struct {
-		Delta agentStreamDelta `json:"delta"`
+		Delta        agentStreamDelta `json:"delta"`
+		FinishReason string           `json:"finish_reason"`
 	} `json:"choices"`
 	Error *APIError `json:"error,omitempty"`
 }
@@ -540,12 +542,16 @@ func validateApprovedWorkspace(workspaceRoot string, approvedRoots []string) err
 	if len(approvedRoots) == 0 {
 		return nil
 	}
+	workspaceRoot, err := workspacepath.Canonical(workspaceRoot)
+	if err != nil {
+		return err
+	}
 	for _, approvedRoot := range approvedRoots {
 		approvedRoot = strings.TrimSpace(approvedRoot)
 		if approvedRoot == "" {
 			continue
 		}
-		absoluteRoot, err := filepath.Abs(approvedRoot)
+		absoluteRoot, err := workspacepath.Canonical(approvedRoot)
 		if err != nil {
 			continue
 		}
@@ -673,6 +679,8 @@ func requestAgentCompletionWithReasoning(
 	streamScanner := bufio.NewScanner(resp.Body)
 	streamScanner.Buffer(make([]byte, 64*1024), 4<<20)
 	sawChoice := false
+	sawDone := false
+	finishReason := ""
 	emit := func(eventType, data string) error {
 		if data == "" || events == nil {
 			return nil
@@ -692,6 +700,7 @@ func requestAgentCompletionWithReasoning(
 		}
 		data = strings.TrimSpace(data)
 		if data == "[DONE]" {
+			sawDone = true
 			break
 		}
 
@@ -709,6 +718,9 @@ func requestAgentCompletionWithReasoning(
 
 		for _, choice := range chunk.Choices {
 			sawChoice = true
+			if choice.FinishReason != "" {
+				finishReason = choice.FinishReason
+			}
 			reasoning := choice.Delta.Reasoning
 			if reasoning == "" {
 				reasoning = choice.Delta.ReasoningContent
@@ -754,6 +766,12 @@ func requestAgentCompletionWithReasoning(
 	}
 	if !sawChoice {
 		return agentMessage{}, errors.New("OpenRouter stream returned no choices")
+	}
+	if !sawDone {
+		return agentMessage{}, errors.New("OpenRouter stream ended before completion; retry the job to continue")
+	}
+	if finishReason != "" && finishReason != "stop" && finishReason != "tool_calls" {
+		return agentMessage{}, fmt.Errorf("OpenRouter response is incomplete (finish_reason=%s); retry the job to continue", finishReason)
 	}
 	if len(assistantMessage.ReasoningDetails) > 0 {
 		assistantMessage.Reasoning = ""
@@ -880,6 +898,7 @@ func agentTools(options RunOptions) []map[string]any {
 	tools := make([]map[string]any, 0, len(options.Tools)+5)
 	if !options.OnlyTools {
 		tools = append(tools, allowedAgentTools()...)
+		tools = append(tools, workspaceToolDefinitions()...)
 	}
 	for _, tool := range options.Tools {
 		if strings.TrimSpace(tool.Name) == "" || tool.Execute == nil {
@@ -944,8 +963,12 @@ func executeAgentTool(
 		} else {
 			result = agentToolResult{Success: true, Result: value}
 		}
+	} else if options.OnlyTools {
+		result = agentToolResult{Error: "tool is unavailable for this run"}
+	} else if call.Function.Name == "run_command" {
+		result = runWorkspaceCommand(ctx, call, workspaceRoot)
 	} else {
-		result = runAgentTool(call, workspaceRoot, maxFileBytes)
+		result = runAgentToolContext(ctx, call, workspaceRoot, maxFileBytes)
 	}
 	content, err := json.Marshal(result)
 	if err != nil {
@@ -1026,6 +1049,14 @@ func toolResultMessage(call agentToolCall, content []byte) agentMessage {
 }
 
 func runAgentTool(call agentToolCall, workspaceRoot string, maxFileBytes int64) agentToolResult {
+	return runAgentToolContext(context.Background(), call, workspaceRoot, maxFileBytes)
+}
+
+func runAgentToolContext(ctx context.Context, call agentToolCall, workspaceRoot string, maxFileBytes int64) agentToolResult {
+	switch call.Function.Name {
+	case "view_file_tree", "list_files", "search_files", "create_directory", "apply_patch":
+		return extendedWorkspaceTool(ctx, call, workspaceRoot, maxFileBytes)
+	}
 	type pathArguments struct {
 		RelativePath string `json:"relative_path"`
 	}
@@ -1039,21 +1070,6 @@ func runAgentTool(call agentToolCall, workspaceRoot string, maxFileBytes int64) 
 	}
 
 	switch call.Function.Name {
-	case "view_file_tree":
-		var arguments pathArguments
-		if err := json.Unmarshal([]byte(call.Function.Arguments), &arguments); err != nil {
-			return fail(fmt.Errorf("decode arguments: %w", err))
-		}
-		path, err := safeAgentPath(workspaceRoot, arguments.RelativePath)
-		if err != nil {
-			return fail(err)
-		}
-		result, err := agent_functions.View_fileTree(path)
-		if err != nil {
-			return fail(err)
-		}
-		return agentToolResult{Success: true, Result: result}
-
 	case "read_file_contents":
 		var arguments pathArguments
 		if err := json.Unmarshal([]byte(call.Function.Arguments), &arguments); err != nil {
@@ -1070,7 +1086,7 @@ func runAgentTool(call agentToolCall, workspaceRoot string, maxFileBytes int64) 
 		if fileInfo.Size() > maxFileBytes {
 			return fail(fmt.Errorf("file is %d bytes; maximum readable size is %d", fileInfo.Size(), maxFileBytes))
 		}
-		result, err := agent_functions.Read_fileContents(path)
+		result, err := agent_functions.ReadLimitedFile(path, maxFileBytes)
 		if err != nil {
 			return fail(err)
 		}
@@ -1117,48 +1133,5 @@ func runAgentTool(call agentToolCall, workspaceRoot string, maxFileBytes int64) 
 }
 
 func safeAgentPath(workspaceRoot, relativePath string) (string, error) {
-	if strings.TrimSpace(relativePath) == "" {
-		return "", errors.New("relative_path cannot be empty")
-	}
-	if filepath.IsAbs(relativePath) || filepath.VolumeName(relativePath) != "" {
-		return "", errors.New("only paths relative to the project root are allowed")
-	}
-
-	cleanPath := filepath.Clean(relativePath)
-	for _, part := range strings.Split(cleanPath, string(os.PathSeparator)) {
-		if strings.EqualFold(part, ".git") ||
-			strings.HasPrefix(strings.ToLower(part), ".env") {
-			return "", fmt.Errorf("access to %q is not allowed", relativePath)
-		}
-	}
-
-	root, err := filepath.Abs(workspaceRoot)
-	if err != nil {
-		return "", fmt.Errorf("resolve project root: %w", err)
-	}
-	root, err = filepath.EvalSymlinks(root)
-	if err != nil {
-		return "", fmt.Errorf("resolve project root symlinks: %w", err)
-	}
-	target := filepath.Join(root, cleanPath)
-	resolvedTarget, err := filepath.EvalSymlinks(target)
-	if errors.Is(err, os.ErrNotExist) {
-		resolvedParent, parentErr := filepath.EvalSymlinks(filepath.Dir(target))
-		if parentErr != nil {
-			return "", fmt.Errorf("resolve target parent: %w", parentErr)
-		}
-		resolvedTarget = filepath.Join(resolvedParent, filepath.Base(target))
-	} else if err != nil {
-		return "", fmt.Errorf("resolve target: %w", err)
-	}
-	pathFromRoot, err := filepath.Rel(root, resolvedTarget)
-	if err != nil {
-		return "", fmt.Errorf("validate project path: %w", err)
-	}
-	if pathFromRoot == ".." ||
-		strings.HasPrefix(pathFromRoot, ".."+string(os.PathSeparator)) {
-		return "", errors.New("path escapes the project root")
-	}
-
-	return resolvedTarget, nil
+	return workspacepath.Resolve(workspaceRoot, relativePath)
 }

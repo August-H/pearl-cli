@@ -9,7 +9,10 @@ permissions:
   contents: write
 
 jobs:
+  checks:
+    uses: ./.github/workflows/ci.yml
   release:
+    needs: checks
     strategy:
       matrix:
         include:
@@ -19,7 +22,7 @@ jobs:
             goarch: arm64
             packages: ""
             cc: ""
-          - os: macos-13 # Last Intel runner
+          - os: macos-15-intel
             goos: darwin
             goarch: amd64
             packages: ""

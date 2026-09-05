@@ -6,8 +6,10 @@ import (
 
 func Create_file(relative_path string) (string, error) {
 
-	if _, err := os.ReadFile(relative_path); err == nil {
-		return "File already exsists at: " + relative_path, nil
+	if _, err := os.Stat(relative_path); err == nil {
+		return "File already exists at: " + relative_path, nil
+	} else if !os.IsNotExist(err) {
+		return "", err
 	}
 
 	file, err := os.OpenFile(relative_path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0644)

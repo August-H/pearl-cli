@@ -18,6 +18,7 @@ import (
 )
 
 type Settings struct {
+	AllowedCommands           []string `json:"allowed_commands,omitempty"`
 	Username                  string   `json:"username"`
 	Model                     string   `json:"model"`
 	Max_concurrency           int      `json:"max_concurrency"`

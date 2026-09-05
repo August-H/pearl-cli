@@ -132,7 +132,9 @@ func installLatestRelease(force bool) int {
 		Checksum:    expectedChecksum,
 		OldSavePath: oldPath,
 	}); err != nil {
-		err = selfupdate.RollbackError(err)
+		if rollbackErr := selfupdate.RollbackError(err); rollbackErr != nil {
+			err = fmt.Errorf("%w; rollback also failed: %v", err, rollbackErr)
+		}
 		return printError("Update", err)
 	}
 	if length >= 0 {
