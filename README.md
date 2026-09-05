@@ -380,8 +380,8 @@ If the process disappears while a job is running, that job becomes
 `interrupted` on the next start. Pearl does not automatically replay it because
 future tools may have irreversible side effects. Inspect it and use
 `pearl retry <job-id>` when appropriate. A job that errors before the agent
-produces any work is marked `pending` instead of `failed`; fix the blocking
-problem and retry it. Queued jobs and schedules survive a restart automatically.
+produces any work is marked `failed`; fix the blocking problem and retry it.
+Queued jobs and schedules survive a restart automatically.
 
 ## Safety settings
 
@@ -417,3 +417,69 @@ set it to absolute directories Pearl is allowed to work beneath:
 File tools reject absolute paths from the model, parent-directory escapes,
 `.git`, `.env*`, and symlink escapes. Reads and writes are size-limited, and
 whole-file replacements use an atomic temporary-file rename.
+
+File tools also reject symlinks and Windows junctions below the workspace,
+including aliases to protected files. Approved workspace roots are compared
+against the actual resolved directory.
+
+### Agent editing and verification
+
+Agents can create nested directories with `create_directory` and make targeted
+edits with `apply_patch`. A patch replaces one exact occurrence of `old_text`;
+missing or ambiguous matches require the agent to read the file again.
+
+`list_files` and `search_files` return pages with `next_offset` and `truncated`.
+They exclude common dependency/build directories and protected files. Simple
+glob patterns from `.gitignore` and `.pearlignore` in the requested directory
+are honored: `*.log`, `generated/`, and `docs/draft.txt`, for example. Negation,
+recursive `**` patterns, and nested ignore files are not full Git-compatible
+ignore processing. Search is literal and case-sensitive, with line numbers and
+bounded snippets; binary and oversized files are skipped.
+
+To let agents run tests or builds, explicitly enable trusted executables in
+Pearl's durable user `settings.json`:
+
+```json
+"allowed_commands": ["go", "node"]
+```
+
+The `run_command` tool takes an executable, an argument array, and an optional
+workspace-relative directory. It runs without a shell, with a default 60-second
+timeout (maximum 120 seconds), 64 KiB of combined output, and child-process
+cleanup. Results include the exit code, timeout state, and output truncation.
+Common credential environment variables are removed from the child environment.
+Commands are disabled when `allowed_commands` is absent or empty. Repository
+settings cannot grant this permission; only durable user settings are consulted.
+
+Enable this only for trusted projects: test/build programs execute repository
+code with your user permissions. The working-directory check is not an OS
+filesystem or network sandbox, and enabled programs can access resources outside
+the workspace. Use a separate container or restricted account for untrusted code.
+
+Incomplete model streams and token-limit responses fail the job instead of
+marking a partial answer completed. Streamed output remains in job events;
+retry resumes from the last complete checkpoint.
+
+### Scripting and command help
+
+Use an explicit path without opening a folder picker:
+
+```bash
+pearl job --workspace /path/to/project -n "fix tests" "fix failing tests"
+pearl --workspace /path/to/project jobs --json
+pearl jobs view "fix tests" --json
+pearl status --json
+pearl schedule list --all --json
+pearl daemon --help
+```
+
+The global `--workspace <path>` goes before the command. `job`, `schedule add`,
+and new `autonomous` goals also accept their own `--workspace` flag. JSON output
+is available for `version`, `status`, `daemon status`, `jobs`, `jobs view`,
+`archive`, and `schedule list`. It bypasses interactive views and emits one JSON
+value on stdout, or a JSON error on stderr with a nonzero exit code. JSON queries
+do not start the daemon automatically; start it with `pearl daemon start` first.
+
+Pull requests and main-branch pushes run vet, race-enabled tests, builds, and
+isolated CLI smoke tests on Linux, macOS, and Windows. Releases wait for those
+checks before building and uploading binaries.

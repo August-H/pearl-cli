@@ -317,7 +317,7 @@ func changedFilesForJob(executions []store.ToolExecution) []jobFileChange {
 	indexes := make(map[string]int)
 	for _, execution := range executions {
 		if !toolExecutionSucceeded(execution.Result) ||
-			(execution.ToolName != "create_file" && execution.ToolName != "write_to_file") {
+			(execution.ToolName != "create_file" && execution.ToolName != "write_to_file" && execution.ToolName != "apply_patch") {
 			continue
 		}
 		var arguments struct {
@@ -355,11 +355,16 @@ func toolExecutionSucceeded(value string) bool {
 
 func toolArgumentsSummary(value string) string {
 	var arguments struct {
-		RelativePath string `json:"relative_path"`
-		Question     string `json:"question"`
+		RelativePath string   `json:"relative_path"`
+		Question     string   `json:"question"`
+		Command      string   `json:"command"`
+		Args         []string `json:"args"`
 	}
 	if json.Unmarshal([]byte(value), &arguments) != nil {
 		return ""
+	}
+	if arguments.Command != "" {
+		return strings.Join(append([]string{arguments.Command}, arguments.Args...), " ")
 	}
 	if strings.TrimSpace(arguments.RelativePath) != "" {
 		return filepath.ToSlash(filepath.Clean(arguments.RelativePath))

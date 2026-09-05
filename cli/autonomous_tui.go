@@ -35,6 +35,7 @@ func runAutonomous(args []string) int {
 	flags := flag.NewFlagSet("autonomous", flag.ContinueOnError)
 	flags.SetOutput(os.Stderr)
 	resume := flags.String("resume", "", "resume an autonomous session by ID")
+	workspacePath := flags.String("workspace", "", "workspace directory path for a new goal")
 	flags.Usage = func() {
 		fmt.Fprintln(flags.Output(), `Usage: pearl autonomous [--resume <session-id>] ["goal"]`)
 		fmt.Fprintln(flags.Output(), "  With no goal, Pearl resumes the latest autonomous session.")
@@ -46,6 +47,9 @@ func runAutonomous(args []string) int {
 		return 2
 	}
 	goal := strings.TrimSpace(strings.Join(flags.Args(), " "))
+	if *workspacePath != "" && goal == "" {
+		return printError("Workspace", errors.New("--workspace requires a new goal"))
+	}
 	if strings.TrimSpace(*resume) != "" && goal != "" {
 		flags.Usage()
 		return 2
@@ -66,6 +70,9 @@ func runAutonomous(args []string) int {
 	switch {
 	case goal != "":
 		workspace, workspaceErr := os.Getwd()
+		if *workspacePath != "" {
+			workspace, workspaceErr = explicitWorkspace(*workspacePath)
+		}
 		if workspaceErr != nil {
 			cancel()
 			return printError("Autonomous", workspaceErr)

@@ -158,6 +158,18 @@ func EnsureAgentSettings() (string, error) {
 	if err := validateSettings(contents); err != nil {
 		return "", fmt.Errorf("validate settings: %w", err)
 	}
+	// Import project preferences, but never let repository contents opt the
+	// user into command execution when the daemon first creates its settings.
+	var imported map[string]json.RawMessage
+	if err := json.Unmarshal(contents, &imported); err != nil {
+		return "", err
+	}
+	delete(imported, "allowed_commands")
+	contents, err = json.MarshalIndent(imported, "", "  ")
+	if err != nil {
+		return "", err
+	}
+	contents = append(contents, '\n')
 	if err := os.MkdirAll(filepath.Dir(target), 0o700); err != nil {
 		return "", err
 	}

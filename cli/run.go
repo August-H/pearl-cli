@@ -30,7 +30,8 @@ var (
 const usage = `Pearl CLI
 
 Usage:
-  pearl job [-d] [-n name] "prompt"                        Create a pending job
+  pearl --workspace <path> <command>                      Run a command in a workspace
+  pearl job [-d | --workspace path] [-n name] "prompt"     Create a pending job
   pearl run [--detach] <job-id>                            Run or retry a job
   pearl configure                                          Set the API key and model
   pearl model [--list] [--set <model-id>] [--free]         Browse and set the model
@@ -61,9 +62,34 @@ Usage:
     install                                                Start it automatically at login
     uninstall                                              Remove the login service
 
-  pearl help                                               Show this help`
+  pearl help                                               Show this help
+
+Inspection commands support --json: version, status, daemon status, jobs,
+jobs view, archive, and schedule list. Use <command> --help for command help.`
 
 func Run(args []string) int {
+	if len(args) >= 1 && args[0] == "--workspace" {
+		if len(args) < 3 {
+			return printError("Workspace", errors.New("usage: pearl --workspace <path> <command>"))
+		}
+		original, err := os.Getwd()
+		if err != nil {
+			return printError("Workspace", err)
+		}
+		if err := os.Chdir(args[1]); err != nil {
+			return printError("Workspace", err)
+		}
+		defer os.Chdir(original)
+		args = args[2:]
+	}
+	if commandHelp(args) {
+		return 0
+	}
+	if len(args) > 0 && (args[0] == "--json" || args[0] == "jobs" || args[0] == "archive" || args[0] == "status" || args[0] == "version" || (len(args) > 1 && (args[0] == "schedule" && args[1] == "list" || args[0] == "daemon" && args[1] == "status"))) {
+		if jsonOutput, rest := extractJSONFlag(args); jsonOutput {
+			return runJSONCommand(rest)
+		}
+	}
 	if len(args) == 0 {
 		return runDashboard(nil)
 	}
@@ -293,10 +319,12 @@ func createJobWithDirectoryPicker(
 	name := flags.String("n", "", "job ID, up to 20 characters")
 	flags.StringVar(name, "name", "", "job ID, up to 20 characters")
 	chooseDirectory := flags.Bool("d", false, "choose the job directory")
+	workspacePath := flags.String("workspace", "", "workspace directory path (no picker)")
 	flags.BoolVar(chooseDirectory, "directory", false, "choose the job directory")
 	flags.Usage = func() {
 		fmt.Fprintln(flags.Output(), `Usage: pearl job [-d] [-n name] "prompt"`)
 		fmt.Fprintln(flags.Output(), "  -d, --directory  Open a directory picker")
+		fmt.Fprintln(flags.Output(), "  --workspace path  Use a directory without opening a picker")
 	}
 	if err := flags.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
@@ -312,9 +340,18 @@ func createJobWithDirectoryPicker(
 	if err := store.ValidateJobName(*name); err != nil {
 		return printError("Job", err)
 	}
+	if *chooseDirectory && *workspacePath != "" {
+		return printError("Job", errors.New("use either --directory or --workspace"))
+	}
 	workspace, err := os.Getwd()
 	if err != nil {
 		return printError("Job", err)
+	}
+	if *workspacePath != "" {
+		workspace, err = explicitWorkspace(*workspacePath)
+		if err != nil {
+			return printError("Workspace", err)
+		}
 	}
 	if *chooseDirectory {
 		workspace, err = pickDirectory(workspace)
@@ -773,7 +810,11 @@ func runSchedule(args []string) int {
 		flags.SetOutput(os.Stderr)
 		every := flags.Duration("every", 0, "run interval, for example 30m or 24h")
 		name := flags.String("name", "scheduled task", "schedule name")
+		workspacePath := flags.String("workspace", "", "workspace directory path")
 		if err := flags.Parse(args[1:]); err != nil {
+			if errors.Is(err, flag.ErrHelp) {
+				return 0
+			}
 			return 2
 		}
 		prompt := strings.TrimSpace(strings.Join(flags.Args(), " "))
@@ -787,6 +828,12 @@ func runSchedule(args []string) int {
 		workspace, err := os.Getwd()
 		if err != nil {
 			return printError("Schedule", err)
+		}
+		if *workspacePath != "" {
+			workspace, err = explicitWorkspace(*workspacePath)
+			if err != nil {
+				return printError("Workspace", err)
+			}
 		}
 		if err := ensureDaemonRunning(); err != nil {
 			return printError("Schedule", err)
