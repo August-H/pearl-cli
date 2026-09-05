@@ -16,7 +16,43 @@ import (
 const (
 	autonomousJobLimit    = 32
 	autonomousPromptLimit = 64 << 10
+
+	autonomousDefaultDuration = 2 * time.Hour
+	autonomousMaxDuration     = 6 * time.Hour
+	autonomousDefaultDepth    = 64
+	autonomousMaxDepth        = 128
 )
+
+func autonomousCoordinatorLimits() (time.Duration, int) {
+	settings, err := openrouter_request.LoadAgentSettings()
+	if err != nil {
+		return autonomousDefaultDuration, autonomousDefaultDepth
+	}
+	duration := autonomousDefaultDuration
+	if settings.Max_job_seconds > 0 {
+		// Coordinator waits for subagents sharing the single worker queue,
+		// so it needs a multiple of a single-job budget, bounded to avoid
+		// runaway cost.
+		duration = time.Duration(settings.Max_job_seconds) * time.Second * 4
+		if duration < time.Hour {
+			duration = time.Hour
+		}
+		if duration > autonomousMaxDuration {
+			duration = autonomousMaxDuration
+		}
+	}
+	depth := autonomousDefaultDepth
+	if settings.Max_depth > 0 {
+		depth = settings.Max_depth
+		if depth > autonomousMaxDepth {
+			depth = autonomousMaxDepth
+		}
+		if depth <= 0 {
+			depth = autonomousDefaultDepth
+		}
+	}
+	return duration, depth
+}
 
 type AutonomousOutcome struct {
 	Finished bool
@@ -222,10 +258,11 @@ func (OpenRouterAutonomousRunner) Run(
 		"Goal:\n%s\n\nWorkspace:\n%s\n\nJobs already created in this session:\n%s",
 		session.Goal, session.WorkspaceRoot, existingJSON,
 	)
+	coordinatorDuration, coordinatorDepth := autonomousCoordinatorLimits()
 	answer, err := openrouter_request.Run(ctx, prompt, openrouter_request.RunOptions{
 		WorkspaceRoot: session.WorkspaceRoot,
-		MaxDuration:   24 * time.Hour,
-		MaxToolDepth:  128,
+		MaxDuration:   coordinatorDuration,
+		MaxToolDepth:  coordinatorDepth,
 		SystemPrompt:  autonomousSystemPrompt,
 		Tools:         []openrouter_request.Tool{createJob, listJobs, waitForJobs, finish},
 		OnlyTools:     true,

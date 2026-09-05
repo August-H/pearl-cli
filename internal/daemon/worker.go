@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"strings"
 	"sync"
 	"time"
 
@@ -167,15 +168,35 @@ func (m *Manager) runJob(parent context.Context, job store.Job) {
 	}
 
 	status := store.JobFailed
-	if errors.Is(err, context.Canceled) {
-		status = store.JobCancelled
+	errorText := err.Error()
+	switch {
+	case errors.Is(err, context.DeadlineExceeded):
+		// Timeouts are user-visible failures, not cancellations. Make the
+		// message explicit so users know to raise max_job_seconds.
+		lower := strings.ToLower(errorText)
+		if strings.Contains(lower, "deadline") || strings.Contains(lower, "timeout") ||
+			strings.Contains(lower, "time limit") {
+			errorText = fmt.Sprintf("job timed out: %s", errorText)
+		} else {
+			errorText = fmt.Sprintf("job exceeded time limit: %s", errorText)
+		}
+	case errors.Is(err, context.Canceled):
+		if parent.Err() != nil {
+			// Daemon is shutting down. Mark interrupted (retryable)
+			// instead of cancelled so no work is silently lost. This
+			// matches RecoverRunningJobs for crash recovery.
+			status = store.JobInterrupted
+			errorText = "Pearl stopped while this job was running"
+		} else {
+			status = store.JobCancelled
+		}
 	}
 	errorContext, errorCancel := context.WithTimeout(context.Background(), 5*time.Second)
-	if _, appendErr := m.store.AppendEvent(errorContext, job.ID, "error", err.Error()); appendErr != nil {
+	if _, appendErr := m.store.AppendEvent(errorContext, job.ID, "error", errorText); appendErr != nil {
 		log.Printf("Pearl could not persist error event for %s: %v", job.ID, appendErr)
 	}
 	errorCancel()
-	m.finishJob(job.ID, status, "", err.Error())
+	m.finishJob(job.ID, status, "", errorText)
 }
 
 func (m *Manager) finishJob(jobID, status, result, errorText string) {
@@ -185,6 +206,13 @@ func (m *Manager) finishJob(jobID, status, result, errorText string) {
 		lastError = m.store.FinishJob(ctx, jobID, status, result, errorText)
 		cancel()
 		if lastError == nil {
+			return
+		}
+		// Another transition (cancel/archive/retry) already won the race.
+		// The current terminal state is authoritative; do not overwrite it.
+		if strings.Contains(lastError.Error(), "already finished") ||
+			strings.Contains(lastError.Error(), "is no longer running") ||
+			strings.Contains(lastError.Error(), "cannot be finished from status") {
 			return
 		}
 		time.Sleep(time.Duration(attempt+1) * 100 * time.Millisecond)

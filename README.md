@@ -6,6 +6,7 @@ Pearl is an agent task manager. You can assign work as jobs, close the terminal,
 - Creates named jobs for a specific project directory.
 - Runs jobs in a durable queue, one at a time.
 - Saves transcripts, tool activity, changed files, errors, and user responses.
+- Compacts long-running model context automatically without trimming the saved transcript.
 - Pauses a job when the agent needs input without blocking the rest of the queue.
 - Provides a terminal dashboard for running, retrying, answering, reviewing, and
   archiving jobs.
@@ -112,6 +113,12 @@ only the Unix socket path.
 a custom model ID. It stores the selection in the durable `settings.json`. The
 same wizard runs inside the dashboard command box when you enter `configure`.
 
+`pearl model` opens an interactive picker with every current OpenRouter model,
+grouped by provider with older generations hidden (only Fable 5.1, not Fable 5).
+The Free Tier option at the top selects `openrouter/free`. Non-interactive
+flags cover scripts and the dashboard: `pearl model --list`,
+`pearl model --set <model-id>`, and `pearl model --free`.
+
 ## Jobs and directories
 
 Create a job from the directory Pearl should work in, then run it by ID:
@@ -125,7 +132,8 @@ pearl run "fix tests"
 `pearl run <job-id>` queues a pending job or retries a finished job, starts the
 background daemon when needed, and streams the result. Add `--detach` before
 the ID to run it in the background. Put `-n "name"` before the prompt to use
-that name as the job ID. Custom IDs can contain up to 20 characters.
+that name as the job ID. Custom IDs can contain up to 20 characters and cannot
+begin with a hyphen.
 
 Add `--directory` or `-d` to choose another workspace with a native folder
 picker. Pearl validates the selection before saving the job. macOS uses the
@@ -148,6 +156,7 @@ pearl jobs
 pearl jobs view "login fix"
 pearl archive
 pearl dashboard
+pearl model
 pearl attach <job-id>
 pearl respond <job-id> "your answer"
 pearl cancel <job-id>
@@ -311,11 +320,14 @@ Interval schedules persist in SQLite and enqueue normal jobs when due:
 ```bash
 pearl schedule add --every 30m --name repository-check "inspect the repository for regressions"
 pearl schedule list
+pearl schedule list --all
 pearl schedule remove <schedule-id>
 ```
 
 A schedule captures the working directory in which it was created. Scheduled
 jobs use the same single-agent queue as interactive jobs, so they cannot overlap.
+`schedule list` shows schedules for the current directory and its subfolders.
+Use `schedule list --all` to include every workspace and add a WORKSPACE column.
 
 ## Architecture
 
@@ -355,6 +367,15 @@ Questions awaiting user input, their pending tool-call IDs, and later responses
 are stored with the job. They survive daemon restarts and resume through the
 same checkpointed transcript.
 
+Long jobs keep two durable records: the complete transcript used by `jobs view`
+and a smaller context sent back to the model. When the estimated model context
+passes `context_compaction_tokens`, Pearl asks the configured model for a
+continuation summary and keeps about `context_keep_tokens` of the most recent
+completed work. Assistant tool calls and their results are kept as one unit, so
+compaction cannot create an orphaned result or cause a completed call to run
+again. If the summary request fails, Pearl uses a bounded local summary and
+continues. Attach output reports each compaction as a `[context]` event.
+
 If the process disappears while a job is running, that job becomes
 `interrupted` on the next start. Pearl does not automatically replay it because
 future tools may have irreversible side effects. Inspect it and use
@@ -372,9 +393,16 @@ The generated settings use one agent and conservative bounds:
   "max_depth": 30,
   "max_job_seconds": 1800,
   "max_file_bytes": 4194304,
+  "context_compaction_tokens": 12000,
+  "context_keep_tokens": 4000,
   "approved_workspace_roots": []
 }
 ```
+
+Context sizes are conservative estimates because exact tokenization varies by
+model. Lower the trigger for models with small context windows, or raise it for
+models with larger windows. `context_keep_tokens` must be smaller than the
+trigger; Pearl falls back to one third of the trigger if it is not.
 
 When `approved_workspace_roots` is empty, jobs submitted by the same local user
 may target any existing directory. For a permanently unattended installation,

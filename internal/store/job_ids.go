@@ -87,6 +87,9 @@ func ValidateJobName(name string) error {
 	if utf8.RuneCountInString(name) > MaxJobNameLength {
 		return fmt.Errorf("job name must be %d characters or fewer", MaxJobNameLength)
 	}
+	if strings.HasPrefix(name, "-") {
+		return fmt.Errorf("job name cannot begin with a hyphen")
+	}
 	if name == "." || name == ".." {
 		return fmt.Errorf("job name cannot be %q", name)
 	}
@@ -225,12 +228,12 @@ func renameJobID(ctx context.Context, transaction *sql.Tx, oldID, newID string) 
 	if _, err := transaction.ExecContext(ctx, `
 INSERT INTO jobs (
     id, name, prompt, workspace_root, status, result, error, cancel_requested,
-    transcript, input_question, input_tool_call_id, input_response,
+    transcript, agent_context, input_question, input_tool_call_id, input_response,
     created_at, started_at, finished_at
 )
 SELECT
     ?, '', prompt, workspace_root, status, result, error, cancel_requested,
-    transcript, input_question, input_tool_call_id, input_response,
+    transcript, agent_context, input_question, input_tool_call_id, input_response,
     created_at, started_at, finished_at
 FROM jobs WHERE id = ?`, newID, oldID); err != nil {
 		return fmt.Errorf("copy job %q: %w", oldID, err)

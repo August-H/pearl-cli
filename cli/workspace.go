@@ -42,6 +42,22 @@ func filterJobsForWorkspace(jobs []store.Job, workspace string) []store.Job {
 	return scoped
 }
 
+func filterSchedulesForWorkspace(
+	schedules []store.Schedule,
+	workspace string,
+) []store.Schedule {
+	if workspace == "" {
+		return schedules
+	}
+	scoped := make([]store.Schedule, 0, len(schedules))
+	for _, schedule := range schedules {
+		if jobBelongsToWorkspace(schedule.WorkspaceRoot, workspace) {
+			scoped = append(scoped, schedule)
+		}
+	}
+	return scoped
+}
+
 func jobBelongsToWorkspace(workspaceRoot, root string) bool {
 	return pathContains(resolveWorkspacePath(root), resolveWorkspacePath(workspaceRoot))
 }
@@ -68,7 +84,7 @@ func pathContains(root, target string) bool {
 const workspaceBoardLabelLimit = 32
 
 func workspaceBoardLabel(directory string) string {
-	label := strings.ReplaceAll(displayJobDirectory(directory), "\n", " ")
+	label := singleLineTableText(displayJobDirectory(directory))
 	runes := []rune(label)
 	if len(runes) > workspaceBoardLabelLimit {
 		return "…" + string(runes[len(runes)-workspaceBoardLabelLimit+1:])

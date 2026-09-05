@@ -3,14 +3,36 @@ package store
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 )
+
+func ValidateScheduleName(name string) error {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return nil
+	}
+	if !utf8.ValidString(name) {
+		return fmt.Errorf("schedule name must be valid UTF-8")
+	}
+	for _, character := range name {
+		if unicode.IsControl(character) {
+			return fmt.Errorf("schedule name cannot contain control characters")
+		}
+	}
+	return nil
+}
 
 func (s *Store) CreateSchedule(
 	ctx context.Context,
 	name, prompt, workspaceRoot string,
 	interval time.Duration,
 ) (Schedule, error) {
+	if err := ValidateScheduleName(name); err != nil {
+		return Schedule{}, err
+	}
 	if interval < time.Second {
 		return Schedule{}, fmt.Errorf("schedule interval must be at least one second")
 	}

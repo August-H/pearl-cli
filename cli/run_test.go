@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"strings"
 	"sync"
@@ -39,6 +40,12 @@ func (preflightFailureRunner) Run(
 type answerRunner struct{}
 
 type jobDetailsRunner struct{}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (run roundTripFunc) RoundTrip(request *http.Request) (*http.Response, error) {
+	return run(request)
+}
 
 func (answerRunner) Run(
 	_ context.Context,
@@ -250,6 +257,66 @@ func TestDaemonClientArchivesAJob(t *testing.T) {
 	if err != nil || len(sections) == 0 ||
 		!strings.Contains(strings.Join(sections[0].Lines, "\n"), "Archived:") {
 		t.Fatalf("archived job overview = %#v, err=%v", sections, err)
+	}
+}
+
+func TestDaemonClientListsMoreThanFiveHundredJobs(t *testing.T) {
+	client := startTestDaemon(t, answerRunner{})
+	workspace := t.TempDir()
+	for index := 0; index < 501; index++ {
+		name := fmt.Sprintf("page-%03d", index)
+		if _, err := client.submitNamed(
+			context.Background(), name, "pending pagination test", workspace,
+		); err != nil {
+			t.Fatalf("submit %s: %v", name, err)
+		}
+	}
+
+	jobs, err := client.jobs(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(jobs) != 501 {
+		t.Fatalf("listed %d jobs, want 501", len(jobs))
+	}
+	foundOldest := false
+	for _, job := range jobs {
+		if job.ID == "page-000" {
+			foundOldest = true
+			break
+		}
+	}
+	if !foundOldest {
+		t.Fatal("paginated job list omitted page-000")
+	}
+}
+
+func TestDaemonClientStopsWhenOldDaemonRepeatsFirstPage(t *testing.T) {
+	page := make([]store.Job, 500)
+	for index := range page {
+		page[index].ID = fmt.Sprintf("job-%03d", index)
+	}
+	body, err := json.Marshal(page)
+	if err != nil {
+		t.Fatal(err)
+	}
+	requests := 0
+	client := &daemonClient{http: &http.Client{Transport: roundTripFunc(
+		func(*http.Request) (*http.Response, error) {
+			requests++
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Body:       io.NopCloser(bytes.NewReader(body)),
+				Header:     make(http.Header),
+			}, nil
+		},
+	)}}
+	_, err = client.jobs(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "pearl daemon restart") {
+		t.Fatalf("old daemon pagination error = %v", err)
+	}
+	if requests != 2 {
+		t.Fatalf("old daemon received %d page requests, want 2", requests)
 	}
 }
 
@@ -482,6 +549,24 @@ func TestJobCommandCreatesNamedDetachedJob(t *testing.T) {
 	}
 }
 
+func TestFlagLikeJobNamesAreRejectedAndViewKeepsExistingIDs(t *testing.T) {
+	output, exitCode := captureTestStderr(t, func() int {
+		return Run([]string{"job", "-n=-a", "dash identifier"})
+	})
+	if exitCode != 1 || !strings.Contains(output, "cannot begin with a hyphen") {
+		t.Fatalf("flag-like job name exit=%d output=%q", exitCode, output)
+	}
+
+	showAll, rest := parseJobsArguments([]string{"view", "-a"})
+	if showAll || len(rest) != 2 || rest[0] != "view" || rest[1] != "-a" {
+		t.Fatalf("jobs view -a parsed as showAll=%v rest=%q", showAll, rest)
+	}
+	showAll, rest = parseJobsArguments([]string{"--all", "view", "alpha"})
+	if !showAll || len(rest) != 2 || rest[0] != "view" || rest[1] != "alpha" {
+		t.Fatalf("jobs --all view alpha parsed as showAll=%v rest=%q", showAll, rest)
+	}
+}
+
 func TestRunCommandRunsPendingAndCompletedJobByID(t *testing.T) {
 	startTestDaemon(t, answerRunner{})
 	if output, exitCode := captureTestStdout(t, func() int {
@@ -665,6 +750,57 @@ func TestJobsBoardScopesToCurrentWorkspaceByDefault(t *testing.T) {
 	})
 	if exitCode != 0 || !strings.Contains(archiveAllOutput, "far job") {
 		t.Fatalf("--all archive exit=%d output=%q", exitCode, archiveAllOutput)
+	}
+}
+
+func TestScheduleListScopesByWorkspaceAndSanitizesRows(t *testing.T) {
+	client := startTestDaemon(t, answerRunner{})
+	local := t.TempDir()
+	other := t.TempDir()
+	t.Chdir(local)
+	ctx := context.Background()
+	if _, err := client.createSchedule(
+		ctx, "local schedule", "first\nsecond\t\x1b[2J", local, time.Hour,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.createSchedule(
+		ctx, "other schedule", "other prompt", other, 2*time.Hour,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.createSchedule(
+		ctx, "bad\nname", "bad name", local, time.Hour,
+	); err == nil || !strings.Contains(err.Error(), "control characters") {
+		t.Fatalf("multiline schedule name error = %v", err)
+	}
+
+	output, exitCode := captureTestStdout(t, func() int {
+		return Run([]string{"schedule", "list"})
+	})
+	if exitCode != 0 || !strings.Contains(output, "local schedule") ||
+		strings.Contains(output, "other schedule") || strings.Contains(output, "WORKSPACE") {
+		t.Fatalf("scoped schedule list exit=%d output=%q", exitCode, output)
+	}
+	if strings.Contains(output, "\x1b") || !strings.Contains(output, "first second  [2J") {
+		t.Fatalf("schedule list did not sanitize its prompt: %q", output)
+	}
+
+	allOutput, allExitCode := captureTestStdout(t, func() int {
+		return Run([]string{"schedule", "list", "--all"})
+	})
+	if allExitCode != 0 || !strings.Contains(allOutput, "local schedule") ||
+		!strings.Contains(allOutput, "other schedule") ||
+		!strings.Contains(allOutput, "WORKSPACE") {
+		t.Fatalf("all schedule list exit=%d output=%q", allExitCode, allOutput)
+	}
+}
+
+func TestStopDaemonIsIdempotentWhenAlreadyStopped(t *testing.T) {
+	t.Setenv("PEARL_CONFIG_DIR", t.TempDir())
+	output, exitCode := captureTestStdout(t, stopDaemon)
+	if exitCode != 0 || output != "Pearl daemon is already stopped\n" {
+		t.Fatalf("stop stopped daemon exit=%d output=%q", exitCode, output)
 	}
 }
 

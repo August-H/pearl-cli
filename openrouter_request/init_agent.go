@@ -107,17 +107,32 @@ type CheckpointStore interface {
 	) error
 }
 
+// ContextCheckpointStore is an optional extension that lets a durable store
+// keep the model's compactable context separate from the complete transcript.
+// CheckpointStore implementations that do not provide it remain compatible;
+// they retain the full transcript and rebuild model context from it on resume.
+type ContextCheckpointStore interface {
+	LoadAgentContext(ctx context.Context, jobID string) ([]byte, error)
+	SaveAgentCheckpoint(
+		ctx context.Context,
+		jobID string,
+		transcript, agentContext []byte,
+	) error
+}
+
 type RunOptions struct {
-	JobID         string
-	WorkspaceRoot string
-	MaxDuration   time.Duration
-	MaxFileBytes  int64
-	MaxToolDepth  int
-	SystemPrompt  string
-	Tools         []Tool
-	OnlyTools     bool
-	Events        EventSink
-	State         CheckpointStore
+	JobID                   string
+	WorkspaceRoot           string
+	MaxDuration             time.Duration
+	MaxFileBytes            int64
+	MaxToolDepth            int
+	ContextCompactionTokens int
+	ContextKeepTokens       int
+	SystemPrompt            string
+	Tools                   []Tool
+	OnlyTools               bool
+	Events                  EventSink
+	State                   CheckpointStore
 }
 
 // Tool adds a function that the model can call during a run. Parameters must
@@ -235,6 +250,7 @@ func Run(ctx context.Context, prompt string, options RunOptions) (string, error)
 		messages = append(messages, agentMessage{Role: "system", Content: systemPrompt})
 	}
 	messages = append(messages, agentMessage{Role: "user", Content: prompt})
+	transcriptMessages := append([]agentMessage(nil), messages...)
 	loadedTranscript := false
 	if options.State != nil && options.JobID != "" {
 		transcript, err := options.State.LoadTranscript(ctx, options.JobID)
@@ -243,33 +259,106 @@ func Run(ctx context.Context, prompt string, options RunOptions) (string, error)
 		}
 		if len(transcript) > 0 {
 			loadedTranscript = true
-			if err := json.Unmarshal(transcript, &messages); err != nil {
+			if err := json.Unmarshal(transcript, &transcriptMessages); err != nil {
 				return "", fmt.Errorf("decode agent transcript: %w", err)
 			}
-			if len(messages) == 0 {
-				messages = []agentMessage{{Role: "user", Content: prompt}}
+			if len(transcriptMessages) == 0 {
+				transcriptMessages = []agentMessage{{Role: "user", Content: prompt}}
 			}
-		} else if err := saveTranscript(ctx, options, messages); err != nil {
+			messages = append([]agentMessage(nil), transcriptMessages...)
+			if contextState, ok := options.State.(ContextCheckpointStore); ok {
+				agentContext, err := contextState.LoadAgentContext(ctx, options.JobID)
+				if err != nil {
+					return "", fmt.Errorf("load agent context: %w", err)
+				}
+				if len(agentContext) > 0 {
+					if err := json.Unmarshal(agentContext, &messages); err != nil {
+						return "", fmt.Errorf("decode agent context: %w", err)
+					}
+					if len(messages) == 0 {
+						messages = append([]agentMessage(nil), transcriptMessages...)
+					}
+				}
+			}
+		} else if err := saveAgentState(ctx, options, transcriptMessages, messages); err != nil {
 			return "", err
 		}
 	}
 
-	if loadedTranscript && len(messages) > 0 {
-		lastMessage := messages[len(messages)-1]
+	if loadedTranscript && len(transcriptMessages) > 0 {
+		lastMessage := transcriptMessages[len(transcriptMessages)-1]
 		if lastMessage.Role == "assistant" && len(lastMessage.ToolCalls) == 0 {
 			return lastMessage.Content, nil
 		}
 	}
-	completedMessages, err := completePendingToolCalls(
+	completedMessages, err := completePendingToolCallsWithSave(
 		ctx, messages, options, workspaceRoot, maxFileBytes,
+		func(toolMessage agentMessage, activeMessages []agentMessage) error {
+			if !hasToolResult(transcriptMessages, toolMessage.ToolCallID) {
+				transcriptMessages = append(transcriptMessages, toolMessage)
+			}
+			return saveAgentState(ctx, options, transcriptMessages, activeMessages)
+		},
 	)
 	if err != nil {
 		return "", err
 	}
 	messages = completedMessages
 
-	toolDepth := countToolRounds(messages)
+	toolDepth := countToolRounds(transcriptMessages)
+	compactionTokens := options.ContextCompactionTokens
+	if compactionTokens <= 0 {
+		compactionTokens = settings.Context_compaction_tokens
+	}
+	if compactionTokens <= 0 {
+		compactionTokens = defaultContextCompactionTokens
+	}
+	keepTokens := options.ContextKeepTokens
+	if keepTokens <= 0 {
+		keepTokens = settings.Context_keep_tokens
+	}
+	if keepTokens <= 0 {
+		keepTokens = defaultContextKeepTokens
+	}
+	if keepTokens >= compactionTokens {
+		keepTokens = compactionTokens / 3
+		if keepTokens <= 0 {
+			keepTokens = 1
+		}
+	}
+
 	for {
+		compactedMessages, compaction := compactAgentContext(
+			ctx,
+			sharedAgentHTTPClient,
+			apiKey,
+			settings.Model,
+			messages,
+			agentTools(options),
+			compactionTokens,
+			keepTokens,
+		)
+		if compaction.Compacted {
+			messages = compactedMessages
+			if err := saveAgentState(ctx, options, transcriptMessages, messages); err != nil {
+				return "", err
+			}
+			if options.Events != nil {
+				data := fmt.Sprintf(
+					"Compacted %d earlier messages; estimated context %d to %d tokens.",
+					compaction.MessageCount,
+					compaction.BeforeTokens,
+					compaction.AfterTokens,
+				)
+				if compaction.Fallback {
+					data += " Used a local fallback summary."
+				}
+				if err := options.Events(AgentEvent{Type: "context", Data: data}); err != nil {
+					return "", fmt.Errorf("emit context event: %w", err)
+				}
+			}
+		}
+
 		assistantMessage, err := requestAgentCompletion(
 			ctx,
 			sharedAgentHTTPClient,
@@ -284,7 +373,8 @@ func Run(ctx context.Context, prompt string, options RunOptions) (string, error)
 		}
 
 		messages = append(messages, assistantMessage)
-		if err := saveTranscript(ctx, options, messages); err != nil {
+		transcriptMessages = append(transcriptMessages, assistantMessage)
+		if err := saveAgentState(ctx, options, transcriptMessages, messages); err != nil {
 			return "", err
 		}
 		if len(assistantMessage.ToolCalls) == 0 {
@@ -307,7 +397,8 @@ func Run(ctx context.Context, prompt string, options RunOptions) (string, error)
 				return "", err
 			}
 			messages = append(messages, toolMessage)
-			if err := saveTranscript(ctx, options, messages); err != nil {
+			transcriptMessages = append(transcriptMessages, toolMessage)
+			if err := saveAgentState(ctx, options, transcriptMessages, messages); err != nil {
 				return "", err
 			}
 		}
@@ -331,6 +422,26 @@ func completePendingToolCalls(
 	options RunOptions,
 	workspaceRoot string,
 	maxFileBytes int64,
+) ([]agentMessage, error) {
+	return completePendingToolCallsWithSave(
+		ctx,
+		messages,
+		options,
+		workspaceRoot,
+		maxFileBytes,
+		func(_ agentMessage, activeMessages []agentMessage) error {
+			return saveTranscript(ctx, options, activeMessages)
+		},
+	)
+}
+
+func completePendingToolCallsWithSave(
+	ctx context.Context,
+	messages []agentMessage,
+	options RunOptions,
+	workspaceRoot string,
+	maxFileBytes int64,
+	save func(agentMessage, []agentMessage) error,
 ) ([]agentMessage, error) {
 	assistantIndex := -1
 	for index := len(messages) - 1; index >= 0; index-- {
@@ -362,11 +473,22 @@ func completePendingToolCalls(
 			return nil, err
 		}
 		messages = append(messages, toolMessage)
-		if err := saveTranscript(ctx, options, messages); err != nil {
-			return nil, err
+		if save != nil {
+			if err := save(toolMessage, messages); err != nil {
+				return nil, err
+			}
 		}
 	}
 	return messages, nil
+}
+
+func hasToolResult(messages []agentMessage, toolCallID string) bool {
+	for _, message := range messages {
+		if message.Role == "tool" && message.ToolCallID == toolCallID {
+			return true
+		}
+	}
+	return false
 }
 
 func saveTranscript(ctx context.Context, options RunOptions, messages []agentMessage) error {
@@ -379,6 +501,37 @@ func saveTranscript(ctx context.Context, options RunOptions, messages []agentMes
 	}
 	if err := options.State.SaveTranscript(ctx, options.JobID, transcript); err != nil {
 		return fmt.Errorf("save agent transcript: %w", err)
+	}
+	return nil
+}
+
+func saveAgentState(
+	ctx context.Context,
+	options RunOptions,
+	transcriptMessages, contextMessages []agentMessage,
+) error {
+	if options.State == nil || options.JobID == "" {
+		return nil
+	}
+	transcript, err := json.Marshal(transcriptMessages)
+	if err != nil {
+		return fmt.Errorf("encode agent transcript: %w", err)
+	}
+	contextState, ok := options.State.(ContextCheckpointStore)
+	if !ok {
+		if err := options.State.SaveTranscript(ctx, options.JobID, transcript); err != nil {
+			return fmt.Errorf("save agent transcript: %w", err)
+		}
+		return nil
+	}
+	agentContext, err := json.Marshal(contextMessages)
+	if err != nil {
+		return fmt.Errorf("encode agent context: %w", err)
+	}
+	if err := contextState.SaveAgentCheckpoint(
+		ctx, options.JobID, transcript, agentContext,
+	); err != nil {
+		return fmt.Errorf("save agent checkpoint: %w", err)
 	}
 	return nil
 }
@@ -403,6 +556,14 @@ func validateApprovedWorkspace(workspaceRoot string, approvedRoots []string) err
 		}
 	}
 	return fmt.Errorf("workspace %q is not beneath an approved workspace root", workspaceRoot)
+}
+
+func ValidateApprovedWorkspace(workspaceRoot string, approvedRoots []string) error {
+	return validateApprovedWorkspace(workspaceRoot, approvedRoots)
+}
+
+func LoadAgentSettings() (Settings, error) {
+	return loadAgentSettings()
 }
 
 func loadAgentSettings() (Settings, error) {
@@ -446,14 +607,31 @@ func requestAgentCompletion(
 	events EventSink,
 	tools []map[string]any,
 ) (agentMessage, error) {
+	return requestAgentCompletionWithReasoning(
+		ctx, client, apiKey, model, messages, events, tools, true,
+	)
+}
+
+func requestAgentCompletionWithReasoning(
+	ctx context.Context,
+	client *http.Client,
+	apiKey string,
+	model string,
+	messages []agentMessage,
+	events EventSink,
+	tools []map[string]any,
+	reasoningEnabled bool,
+) (agentMessage, error) {
 	payload := map[string]any{
-		"model":               model,
-		"messages":            messages,
-		"reasoning":           Reasoning{Enabled: true},
-		"stream":              true,
-		"tools":               tools,
-		"tool_choice":         "auto",
-		"parallel_tool_calls": false,
+		"model":     model,
+		"messages":  messages,
+		"reasoning": Reasoning{Enabled: reasoningEnabled},
+		"stream":    true,
+	}
+	if len(tools) > 0 {
+		payload["tools"] = tools
+		payload["tool_choice"] = "auto"
+		payload["parallel_tool_calls"] = false
 	}
 
 	body, err := json.Marshal(payload)

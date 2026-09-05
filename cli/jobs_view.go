@@ -66,7 +66,7 @@ func parseShowAllFlag(arguments []string) (bool, []string) {
 }
 
 func runJobs(args []string) int {
-	showAll, rest := parseShowAllFlag(args)
+	showAll, rest := parseJobsArguments(args)
 	switch {
 	case len(rest) == 0:
 		return listJobs(showAll)
@@ -80,11 +80,22 @@ func runJobs(args []string) int {
 	}
 }
 
+func parseJobsArguments(arguments []string) (bool, []string) {
+	if len(arguments) > 0 &&
+		(arguments[0] == "-a" || arguments[0] == "--all") {
+		return true, arguments[1:]
+	}
+	return false, arguments
+}
+
 func viewJob(jobID string) int {
 	jobID = strings.TrimSpace(jobID)
 	if jobID == "" {
 		fmt.Fprintln(os.Stderr, "Usage: pearl jobs view <job-id>")
 		return 2
+	}
+	if err := ensureDaemonRunning(); err != nil {
+		return printError("Jobs", err)
 	}
 	client, err := newDaemonClient()
 	if err != nil {
