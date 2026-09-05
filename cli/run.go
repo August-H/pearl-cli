@@ -13,6 +13,7 @@ import (
 	"syscall"
 	"text/tabwriter"
 	"time"
+	"unicode"
 
 	"github.com/August-H/pearl-cli/internal/store"
 	"github.com/August-H/pearl-cli/openrouter_request"
@@ -32,6 +33,7 @@ Usage:
   pearl job [-d] [-n name] "prompt"                        Create a pending job
   pearl run [--detach] <job-id>                            Run or retry a job
   pearl configure                                          Set the API key and model
+  pearl model [--list] [--set <model-id>] [--free]         Browse and set the model
   pearl jobs [--all]                                       List jobs for this directory
     view <job-id>                                           Show job details and transcript
   pearl archive [--all]                                    List archived jobs
@@ -47,7 +49,7 @@ Usage:
 
   pearl schedule                                           Manage recurring jobs
     add --every <duration> [--name name] "prompt"           Run a prompt on an interval in this workspace
-    list                                                   Show schedules and their next run times
+    list [--all]                                           Show schedules and their next run times
     remove <schedule-id>                                   Delete a schedule
 
   pearl daemon                                             Manage the local background process
@@ -92,6 +94,8 @@ func Run(args []string) int {
 	switch args[0] {
 	case "configure":
 		return runConfigure(args[1:])
+	case "model":
+		return runModel(args[1:])
 	case "job":
 		return createJob(args[1:])
 	case "run":
@@ -169,7 +173,7 @@ func configureOpenRouterInteractively(
 	output io.Writer,
 ) (configureResult, error) {
 	reader := bufio.NewReader(input)
-	apiKey, err := promptForOpenRouterAPIKey(reader, output)
+	apiKey, err := promptForOpenRouterAPIKey(input, reader, output)
 	if err != nil {
 		return configureResult{}, err
 	}
@@ -192,12 +196,16 @@ func configureOpenRouterInteractively(
 }
 
 func promptForOpenRouterAPIKey(
+	input io.Reader,
 	reader *bufio.Reader,
 	output io.Writer,
 ) (string, error) {
 	for {
 		fmt.Fprint(output, "OpenRouter API key: ")
-		apiKey, err := readConfigureLine(reader)
+		apiKey, hidden, err := readConfigureAPIKey(input, reader)
+		if hidden {
+			fmt.Fprintln(output)
+		}
 		if err != nil {
 			return "", fmt.Errorf("read OpenRouter API key: %w", err)
 		}
@@ -206,6 +214,18 @@ func promptForOpenRouterAPIKey(
 		}
 		fmt.Fprintln(output, "API key cannot be empty.")
 	}
+}
+
+func readConfigureAPIKey(
+	input io.Reader,
+	reader *bufio.Reader,
+) (string, bool, error) {
+	if file, ok := input.(*os.File); ok && term.IsTerminal(int(file.Fd())) {
+		apiKey, err := term.ReadPassword(int(file.Fd()))
+		return string(apiKey), true, err
+	}
+	apiKey, err := readConfigureLine(reader)
+	return apiKey, false, err
 }
 
 func saveOpenRouterConfiguration(apiKey, model string) (configureResult, error) {
@@ -425,6 +445,12 @@ func attachWithClientAfter(client *daemonClient, jobID string, after int64) int 
 			fmt.Printf("[tool] %s\n", event.Data)
 		case "tool_cached":
 			fmt.Printf("[tool cached] %s\n", event.Data)
+		case "context":
+			if currentSection != "" {
+				fmt.Println()
+				currentSection = ""
+			}
+			fmt.Printf("[context] %s\n", event.Data)
 		case "input_required":
 			if currentSection != "" {
 				fmt.Println()
@@ -476,6 +502,9 @@ func attachWithClientAfter(client *daemonClient, jobID string, after int64) int 
 }
 
 func listJobs(showAll bool) int {
+	if err := ensureDaemonRunning(); err != nil {
+		return printError("Jobs", err)
+	}
 	client, err := newDaemonClient()
 	if err != nil {
 		return printError("Jobs", err)
@@ -538,6 +567,9 @@ func listJobs(showAll bool) int {
 }
 
 func listArchivedJobs(showAll bool) int {
+	if err := ensureDaemonRunning(); err != nil {
+		return printError("Archive", err)
+	}
 	client, err := newDaemonClient()
 	if err != nil {
 		return printError("Archive", err)
@@ -619,12 +651,21 @@ func jobBoardPaint(enabled bool, code, value string) string {
 }
 
 func jobBoardText(value string) string {
-	value = strings.ReplaceAll(value, "\n", " ")
+	value = singleLineTableText(value)
 	runes := []rune(value)
 	if len(runes) > 60 {
 		return string(runes[:57]) + "..."
 	}
 	return value
+}
+
+func singleLineTableText(value string) string {
+	return strings.Map(func(character rune) rune {
+		if unicode.IsControl(character) {
+			return ' '
+		}
+		return character
+	}, value)
 }
 
 func respondToJob(jobID, response string) int {
@@ -671,22 +712,42 @@ func runSchedule(args []string) int {
 		fmt.Fprintln(os.Stderr, "Usage: pearl schedule <add|list|remove>")
 		return 2
 	}
-	client, err := newDaemonClient()
-	if err != nil {
-		return printError("Schedule", err)
-	}
 	switch args[0] {
 	case "list":
+		showAll, rest := parseShowAllFlag(args[1:])
+		if len(rest) != 0 {
+			fmt.Fprintln(os.Stderr, "Usage: pearl schedule list [--all]")
+			return 2
+		}
+		if err := ensureDaemonRunning(); err != nil {
+			return printError("Schedule", err)
+		}
+		client, err := newDaemonClient()
+		if err != nil {
+			return printError("Schedule", err)
+		}
 		schedules, err := client.schedules(context.Background())
 		if err != nil {
 			return printError("Schedule", err)
 		}
+		if !showAll {
+			schedules = filterSchedulesForWorkspace(schedules, currentWorkspace())
+		}
 		writer := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
-		fmt.Fprintln(writer, "ID\tNAME\tEVERY\tNEXT RUN\tPROMPT")
+		header := "ID\tNAME\tEVERY\tNEXT RUN\t"
+		if showAll {
+			header += "WORKSPACE\t"
+		}
+		fmt.Fprintln(writer, header+"PROMPT")
 		for _, schedule := range schedules {
-			fmt.Fprintf(writer, "%s\t%s\t%s\t%s\t%s\n", schedule.ID,
-				schedule.Name, time.Duration(schedule.IntervalSeconds)*time.Second,
-				schedule.NextRunAt.Local().Format("2006-01-02 15:04:05"), schedule.Prompt)
+			row := fmt.Sprintf("%s\t%s\t%s\t%s\t", schedule.ID,
+				jobBoardText(schedule.Name),
+				time.Duration(schedule.IntervalSeconds)*time.Second,
+				schedule.NextRunAt.Local().Format("2006-01-02 15:04:05"))
+			if showAll {
+				row += workspaceBoardLabel(schedule.WorkspaceRoot) + "\t"
+			}
+			fmt.Fprintf(writer, row+"%s\n", jobBoardText(schedule.Prompt))
 		}
 		_ = writer.Flush()
 		return 0
@@ -694,6 +755,13 @@ func runSchedule(args []string) int {
 		if len(args) != 2 {
 			fmt.Fprintln(os.Stderr, "Usage: pearl schedule remove <schedule-id>")
 			return 2
+		}
+		if err := ensureDaemonRunning(); err != nil {
+			return printError("Schedule", err)
+		}
+		client, err := newDaemonClient()
+		if err != nil {
+			return printError("Schedule", err)
 		}
 		if err := client.deleteSchedule(context.Background(), args[1]); err != nil {
 			return printError("Schedule", err)
@@ -713,7 +781,17 @@ func runSchedule(args []string) int {
 			fmt.Fprintln(os.Stderr, "Usage: pearl schedule add --every <duration> [--name name] \"prompt\"")
 			return 2
 		}
+		if err := store.ValidateScheduleName(*name); err != nil {
+			return printError("Schedule", err)
+		}
 		workspace, err := os.Getwd()
+		if err != nil {
+			return printError("Schedule", err)
+		}
+		if err := ensureDaemonRunning(); err != nil {
+			return printError("Schedule", err)
+		}
+		client, err := newDaemonClient()
 		if err != nil {
 			return printError("Schedule", err)
 		}

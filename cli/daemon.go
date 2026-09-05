@@ -72,6 +72,13 @@ func stopDaemon() int {
 	if err != nil {
 		return printError("Daemon", err)
 	}
+	statusContext, statusCancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	_, statusErr := client.status(statusContext)
+	statusCancel()
+	if statusErr != nil {
+		fmt.Println("Pearl daemon is already stopped")
+		return 0
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	err = client.shutdown(ctx)
 	cancel()

@@ -16,6 +16,7 @@ import (
 
 	"github.com/August-H/pearl-cli/internal/pearlpaths"
 	"github.com/August-H/pearl-cli/internal/store"
+	"github.com/August-H/pearl-cli/openrouter_request"
 )
 
 type Server struct {
@@ -305,7 +306,8 @@ func (s *Server) handleJobs(writer http.ResponseWriter, request *http.Request) {
 			jobs, err = s.store.ListActiveJobs(request.Context())
 		} else {
 			limit, _ := strconv.Atoi(request.URL.Query().Get("limit"))
-			jobs, err = s.store.ListJobs(request.Context(), limit)
+			offset, _ := strconv.Atoi(request.URL.Query().Get("offset"))
+			jobs, err = s.store.ListJobsPage(request.Context(), limit, offset)
 		}
 		if err != nil {
 			writeError(writer, http.StatusInternalServerError, err)
@@ -536,6 +538,10 @@ func (s *Server) handleSchedules(writer http.ResponseWriter, request *http.Reque
 		if name == "" {
 			name = "scheduled task"
 		}
+		if err := store.ValidateScheduleName(name); err != nil {
+			writeError(writer, http.StatusBadRequest, err)
+			return
+		}
 		schedule, err := s.store.CreateSchedule(
 			request.Context(), name, input.Prompt, workspace,
 			time.Duration(input.IntervalSeconds)*time.Second,
@@ -591,6 +597,20 @@ func validateWorkspace(path string) (string, error) {
 	}
 	if !info.IsDir() {
 		return "", fmt.Errorf("workspace_root %q is not a directory", absolute)
+	}
+	// Enforce approved_workspace_roots early so invalid submissions fail
+	// fast instead of sitting in the queue and failing when the worker runs.
+	settings, err := openrouter_request.LoadAgentSettings()
+	if err != nil {
+		if strings.Contains(err.Error(), "settings.json not found") {
+			return absolute, nil
+		}
+		return "", err
+	}
+	if err := openrouter_request.ValidateApprovedWorkspace(
+		absolute, settings.Approved_workspace_roots,
+	); err != nil {
+		return "", err
 	}
 	return absolute, nil
 }

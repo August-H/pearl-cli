@@ -247,7 +247,8 @@ func TestValidateJobNameLimitsCustomIDs(t *testing.T) {
 		t.Fatalf("20-character name was rejected: %v", err)
 	}
 	for _, name := range []string{
-		strings.Repeat("a", MaxJobNameLength+1), "nested/name", "line\nbreak", ".", "..",
+		strings.Repeat("a", MaxJobNameLength+1), "nested/name", "line\nbreak",
+		"-a", "--all", ".", "..",
 	} {
 		if err := ValidateJobName(name); err == nil {
 			t.Fatalf("invalid job name %q was accepted", name)
@@ -255,6 +256,43 @@ func TestValidateJobNameLimitsCustomIDs(t *testing.T) {
 	}
 	if isLegacyJobID("job_custom") {
 		t.Fatal("custom job ID was mistaken for a legacy generated ID")
+	}
+}
+
+func TestValidateScheduleNameRejectsControlCharacters(t *testing.T) {
+	for _, name := range []string{"line\nbreak", "tab\tname", "escape\x1bname"} {
+		if err := ValidateScheduleName(name); err == nil {
+			t.Fatalf("invalid schedule name %q was accepted", name)
+		}
+	}
+	if err := ValidateScheduleName("repository check"); err != nil {
+		t.Fatalf("valid schedule name was rejected: %v", err)
+	}
+}
+
+func TestListJobsPageUsesOffset(t *testing.T) {
+	ctx := context.Background()
+	state := openTestStore(t)
+	workspace := t.TempDir()
+	for _, name := range []string{"first", "second", "third"} {
+		if _, err := state.CreatePendingNamedJob(ctx, name, name, workspace); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	firstPage, err := state.ListJobsPage(ctx, 2, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondPage, err := state.ListJobsPage(ctx, 2, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(firstPage) != 2 || len(secondPage) != 1 {
+		t.Fatalf("page lengths = %d and %d, want 2 and 1", len(firstPage), len(secondPage))
+	}
+	if firstPage[0].ID == secondPage[0].ID || firstPage[1].ID == secondPage[0].ID {
+		t.Fatalf("job pages overlap: first=%#v second=%#v", firstPage, secondPage)
 	}
 }
 
@@ -385,6 +423,15 @@ CREATE TABLE jobs (
 	if err != nil || loaded.Question != "" || loaded.Status != JobQueued {
 		t.Fatalf("migrated job = %#v err=%v", loaded, err)
 	}
+	if err := state.SaveAgentCheckpoint(
+		context.Background(), job.ID, []byte(`[]`), []byte(`[{"role":"user"}]`),
+	); err != nil {
+		t.Fatalf("save migrated agent context: %v", err)
+	}
+	if loadedContext, err := state.LoadAgentContext(context.Background(), job.ID); err != nil ||
+		string(loadedContext) != `[{"role":"user"}]` {
+		t.Fatalf("migrated agent context = %s, err=%v", loadedContext, err)
+	}
 }
 
 func TestMigrationRenamesLegacyJobIDsAndPreservesReferences(t *testing.T) {
@@ -396,9 +443,10 @@ func TestMigrationRenamesLegacyJobIDsAndPreservesReferences(t *testing.T) {
 	}
 	legacyID := "job_0123456789abcdef"
 	createdAt := nowText()
+	agentContext := `[{"role":"user","content":"compact"}]`
 	if _, err := state.db.ExecContext(ctx, `
-INSERT INTO jobs (id, prompt, workspace_root, status, created_at)
-VALUES (?, ?, ?, ?, ?)`, legacyID, "legacy job", t.TempDir(), JobCompleted, createdAt); err != nil {
+INSERT INTO jobs (id, prompt, workspace_root, status, agent_context, created_at)
+VALUES (?, ?, ?, ?, ?, ?)`, legacyID, "legacy job", t.TempDir(), JobCompleted, agentContext, createdAt); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := state.db.ExecContext(ctx, `
@@ -435,6 +483,10 @@ VALUES (?, ?, ?, ?, ?, ?)`, legacyID, "call-1", "test_tool", `{}`, `{"ok":true}`
 	}
 	if _, err := state.GetJob(ctx, legacyID); err == nil {
 		t.Fatalf("legacy job ID %q still exists", legacyID)
+	}
+	loadedContext, err := state.LoadAgentContext(ctx, migratedID)
+	if err != nil || string(loadedContext) != agentContext {
+		t.Fatalf("migrated agent context = %s, err=%v", loadedContext, err)
 	}
 	events, err := state.EventsAfter(ctx, migratedID, 0, 10)
 	if err != nil || len(events) != 1 || events[0].JobID != migratedID {
@@ -576,6 +628,19 @@ func TestJobLifecycleAndCheckpoints(t *testing.T) {
 	loadedTranscript, err := state.LoadTranscript(ctx, job.ID)
 	if err != nil || string(loadedTranscript) != string(transcript) {
 		t.Fatalf("transcript = %s, err=%v", loadedTranscript, err)
+	}
+	agentContext := []byte(`[{"role":"user","content":"compacted context"}]`)
+	updatedTranscript := []byte(`[{"role":"user","content":"complete transcript"}]`)
+	if err := state.SaveAgentCheckpoint(ctx, job.ID, updatedTranscript, agentContext); err != nil {
+		t.Fatal(err)
+	}
+	loadedTranscript, err = state.LoadTranscript(ctx, job.ID)
+	if err != nil || string(loadedTranscript) != string(updatedTranscript) {
+		t.Fatalf("checkpoint transcript = %s, err=%v", loadedTranscript, err)
+	}
+	loadedContext, err := state.LoadAgentContext(ctx, job.ID)
+	if err != nil || string(loadedContext) != string(agentContext) {
+		t.Fatalf("agent context = %s, err=%v", loadedContext, err)
 	}
 	toolResult := []byte(`{"success":true}`)
 	if err := state.SaveToolResult(ctx, job.ID, "call-1", "read_file_contents", `{}`, toolResult); err != nil {

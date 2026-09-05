@@ -194,11 +194,19 @@ func (s *Store) GetJob(ctx context.Context, id string) (Job, error) {
 }
 
 func (s *Store) ListJobs(ctx context.Context, limit int) ([]Job, error) {
+	return s.ListJobsPage(ctx, limit, 0)
+}
+
+func (s *Store) ListJobsPage(ctx context.Context, limit, offset int) ([]Job, error) {
 	if limit <= 0 || limit > 500 {
 		limit = 50
 	}
+	if offset < 0 {
+		offset = 0
+	}
 	rows, err := s.db.QueryContext(ctx,
-		"SELECT "+jobColumns+" FROM jobs WHERE archived_at IS NULL ORDER BY created_at DESC LIMIT ?", limit)
+		"SELECT "+jobColumns+" FROM jobs WHERE archived_at IS NULL ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?",
+		limit, offset)
 	if err != nil {
 		return nil, err
 	}
@@ -315,18 +323,50 @@ WHERE id = ? AND status = ?`, JobRunning, started.Format(time.RFC3339Nano), job.
 
 func (s *Store) FinishJob(ctx context.Context, id, status, resultText, errorText string) error {
 	if status != JobCompleted && status != JobFailed &&
-		status != JobCancelled {
+		status != JobCancelled && status != JobInterrupted {
 		return fmt.Errorf("invalid terminal job status %q", status)
 	}
-	finished := nowText()
 	transaction, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
 	defer transaction.Rollback()
+	var currentStatus string
+	var cancelRequested int
+	var archived sql.NullString
+	err = transaction.QueryRowContext(ctx,
+		"SELECT status, cancel_requested, archived_at FROM jobs WHERE id = ?", id,
+	).Scan(&currentStatus, &cancelRequested, &archived)
+	if errors.Is(err, sql.ErrNoRows) {
+		return fmt.Errorf("job %q not found", id)
+	}
+	if err != nil {
+		return err
+	}
+	if archived.Valid {
+		return fmt.Errorf("job %q is archived", id)
+	}
+	if currentStatus != JobRunning {
+		if currentStatus == JobCompleted || currentStatus == JobFailed ||
+			currentStatus == JobCancelled || currentStatus == JobInterrupted {
+			return fmt.Errorf("job %q already finished with status %q", id, currentStatus)
+		}
+		return fmt.Errorf("job %q cannot be finished from status %q", id, currentStatus)
+	}
+	// A concurrent cancel must win over a normal completion. If the user
+	// asked for cancellation while the worker was finishing, coerce to
+	// cancelled instead of last-write-wins overwriting the request.
+	if cancelRequested != 0 && status != JobCancelled {
+		status = JobCancelled
+		resultText = ""
+		if strings.TrimSpace(errorText) == "" {
+			errorText = "job was cancelled"
+		}
+	}
+	finished := nowText()
 	result, err := transaction.ExecContext(ctx, `
-UPDATE jobs SET status = ?, result = ?, error = ?, finished_at = ? WHERE id = ?`,
-		status, resultText, errorText, finished, id)
+UPDATE jobs SET status = ?, result = ?, error = ?, finished_at = ? WHERE id = ? AND status = ?`,
+		status, resultText, errorText, finished, id, JobRunning)
 	if err != nil {
 		return err
 	}
@@ -335,7 +375,7 @@ UPDATE jobs SET status = ?, result = ?, error = ?, finished_at = ? WHERE id = ?`
 		return err
 	}
 	if affected != 1 {
-		return fmt.Errorf("job %q not found", id)
+		return fmt.Errorf("job %q is no longer running", id)
 	}
 	if _, err := appendEventTx(ctx, transaction, id, "status", status); err != nil {
 		return err
@@ -713,6 +753,31 @@ func (s *Store) LoadTranscript(ctx context.Context, jobID string) ([]byte, error
 
 func (s *Store) SaveTranscript(ctx context.Context, jobID string, transcript []byte) error {
 	_, err := s.db.ExecContext(ctx, "UPDATE jobs SET transcript = ? WHERE id = ?", transcript, jobID)
+	return err
+}
+
+// LoadAgentContext returns the compactable model context for a job. A nil
+// value means the full transcript should be used, including for jobs created
+// before agent context checkpoints were introduced.
+func (s *Store) LoadAgentContext(ctx context.Context, jobID string) ([]byte, error) {
+	var agentContext []byte
+	err := s.db.QueryRowContext(ctx, "SELECT agent_context FROM jobs WHERE id = ?", jobID).Scan(&agentContext)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, fmt.Errorf("job %q not found", jobID)
+	}
+	return agentContext, err
+}
+
+// SaveAgentCheckpoint updates the complete audit transcript and the model's
+// compactable context atomically so a restart cannot observe mismatched state.
+func (s *Store) SaveAgentCheckpoint(
+	ctx context.Context,
+	jobID string,
+	transcript, agentContext []byte,
+) error {
+	_, err := s.db.ExecContext(ctx, `
+UPDATE jobs SET transcript = ?, agent_context = ? WHERE id = ?`,
+		transcript, agentContext, jobID)
 	return err
 }
 

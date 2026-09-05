@@ -112,6 +112,9 @@ var dashboardCommandOptions = []dashboardCommandSuggestion{
 	{usage: "run <job-id>", completion: "run ", description: "Run or retry a job"},
 	{usage: "run --detach <job-id>", completion: "run --detach ", description: "Run without attaching"},
 	{usage: "configure", completion: "configure", description: "Set the API key and model"},
+	{usage: "model", completion: "model", description: "Browse and set the model"},
+	{usage: "model --list", completion: "model --list", description: "List available models"},
+	{usage: "model --free", completion: "model --free", description: "Use the Free Tier"},
 	{usage: "jobs", completion: "jobs", description: "List the job board"},
 	{usage: "jobs view <job-id>", completion: "jobs view ", description: "Show job details and transcript"},
 	{usage: "archive", completion: "archive", description: "List archived jobs"},
@@ -146,6 +149,7 @@ var dashboardConfigureModelOptions = []dashboardCommandSuggestion{
 var dashboardCommandDescriptions = map[string]string{
 	"run":        "Run or retry a job",
 	"configure":  "Set the API key and model",
+	"model":      "Browse and set the model",
 	"jobs":       "List the job board",
 	"archive":    "List archived jobs",
 	"autonomous": "Open or start autonomous mode",
@@ -1844,6 +1848,10 @@ func renderDashboardComposer(
 	daemonActive bool,
 ) string {
 	var composer bytes.Buffer
+	displayText := commandText
+	if configureStep == dashboardConfigureAPIKey && displayText != "" {
+		displayText = strings.Repeat("•", len([]rune(displayText)))
+	}
 	if notice != "" {
 		fmt.Fprintln(&composer, dashboardPaint(
 			color, ansiRed, dashboardTruncate(notice, width),
@@ -1853,7 +1861,7 @@ func renderDashboardComposer(
 		running, queued, waiting, width, color, daemonActive,
 	))
 	if width < 8 {
-		value := commandText
+		value := displayText
 		if value == "" {
 			value = "Type"
 		}
@@ -1881,7 +1889,7 @@ func renderDashboardComposer(
 		plainContent += placeholder
 		styledContent += dashboardPaint(color, ansiDim, placeholder)
 	} else {
-		value := dashboardPromptText(commandText, max(0, innerWidth-3))
+		value := dashboardPromptText(displayText, max(0, innerWidth-3))
 		plainContent += value + "█"
 		styledContent += value + dashboardPaint(color, ansiDim, "█")
 	}

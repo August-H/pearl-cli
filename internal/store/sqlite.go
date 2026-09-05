@@ -53,6 +53,7 @@ CREATE TABLE IF NOT EXISTS jobs (
     error TEXT NOT NULL DEFAULT '',
     cancel_requested INTEGER NOT NULL DEFAULT 0,
     transcript BLOB,
+    agent_context BLOB,
     input_question TEXT NOT NULL DEFAULT '',
     input_tool_call_id TEXT NOT NULL DEFAULT '',
     input_response TEXT NOT NULL DEFAULT '',
@@ -125,6 +126,7 @@ ON autonomous_jobs(session_id, created_at);
 		definition string
 	}{
 		{name: "name", definition: "TEXT NOT NULL DEFAULT ''"},
+		{name: "agent_context", definition: "BLOB"},
 		{name: "input_question", definition: "TEXT NOT NULL DEFAULT ''"},
 		{name: "input_tool_call_id", definition: "TEXT NOT NULL DEFAULT ''"},
 		{name: "input_response", definition: "TEXT NOT NULL DEFAULT ''"},

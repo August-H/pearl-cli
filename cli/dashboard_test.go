@@ -322,7 +322,7 @@ func TestDashboardCommandSuggestionsFilterNavigateAndFill(t *testing.T) {
 	if len(all) != len(dashboardCommandDescriptions) {
 		t.Fatalf("typing a space returned %d commands, want %d", len(all), len(dashboardCommandDescriptions))
 	}
-	if got := dashboardFillSuggestion(" ", 2); got != "jobs" {
+	if got := dashboardFillSuggestion(" ", 3); got != "jobs" {
 		t.Fatalf("filling from the full command list returned %q, want jobs", got)
 	}
 	for _, suggestion := range all {
@@ -565,7 +565,8 @@ func TestRenderDashboardRunsConfigureInsideComposer(t *testing.T) {
 		nil, now, 80, false, nil, "sk-visible-key", "", 0,
 		dashboardCommandView{configureStep: dashboardConfigureAPIKey},
 	)
-	if !strings.Contains(apiKeyOutput, "sk-visible-key█") ||
+	if strings.Contains(apiKeyOutput, "sk-visible-key") ||
+		!strings.Contains(apiKeyOutput, "••••█") ||
 		!strings.Contains(apiKeyOutput, "Enter to continue") {
 		t.Fatalf("dashboard API-key step =\n%s", apiKeyOutput)
 	}

@@ -5,6 +5,8 @@
     "max_depth": 30000000,
     "max_job_seconds": 1800,
     "max_file_bytes": 4194304,
+    "context_compaction_tokens": 12000,
+    "context_keep_tokens": 4000,
     "approved_workspace_roots": [],
     "mode": "default"
 

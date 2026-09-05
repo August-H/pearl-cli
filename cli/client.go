@@ -102,9 +102,25 @@ func (c *daemonClient) submitNamed(
 }
 
 func (c *daemonClient) jobs(ctx context.Context) ([]store.Job, error) {
+	const pageSize = 500
 	var jobs []store.Job
-	err := c.request(ctx, http.MethodGet, "/v1/jobs?limit=500", nil, &jobs)
-	return jobs, err
+	for offset := 0; ; offset += pageSize {
+		var page []store.Job
+		path := "/v1/jobs?limit=" + strconv.Itoa(pageSize) +
+			"&offset=" + strconv.Itoa(offset)
+		if err := c.request(ctx, http.MethodGet, path, nil, &page); err != nil {
+			return nil, err
+		}
+		if offset > 0 && len(page) > 0 && len(jobs) > 0 && page[0].ID == jobs[0].ID {
+			return nil, errors.New(
+				"running Pearl daemon does not support paginated job lists; run `pearl daemon restart`",
+			)
+		}
+		jobs = append(jobs, page...)
+		if len(page) < pageSize {
+			return jobs, nil
+		}
+	}
 }
 
 func (c *daemonClient) archivedJobs(ctx context.Context) ([]store.Job, error) {
