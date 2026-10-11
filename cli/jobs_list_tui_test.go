@@ -128,3 +128,56 @@ func TestJobsListSpaceBuildsTerminalPromptCommands(t *testing.T) {
 		}
 	}
 }
+
+func TestJobsWheelNavigationCombinesReportsFromOneTick(t *testing.T) {
+	var wheel listWheelNavigation
+	now := time.Date(2026, time.October, 10, 12, 0, 0, 0, time.UTC)
+	for _, test := range []struct {
+		after  time.Duration
+		action string
+		want   string
+	}{
+		{0, "scroll_down", "scroll_down"},
+		{2 * time.Millisecond, "scroll_down", ""},
+		{8 * time.Millisecond, "scroll_down", ""},
+		{20 * time.Millisecond, "scroll_down", ""},
+		{150 * time.Millisecond, "scroll_down", "scroll_down"},
+		{152 * time.Millisecond, "scroll_down", ""},
+		{153 * time.Millisecond, "scroll_up", "scroll_up"},
+		{154 * time.Millisecond, "scroll_up", ""},
+		{155 * time.Millisecond, "next", "next"},
+		{156 * time.Millisecond, "scroll_up", "scroll_up"},
+		{157 * time.Millisecond, "", ""},
+		{158 * time.Millisecond, "scroll_up", ""},
+	} {
+		if got := wheel.filter(test.action, now.Add(test.after)); got != test.want {
+			t.Fatalf("at %s filter(%q) = %q, want %q", test.after, test.action, got, test.want)
+		}
+	}
+}
+
+func TestListWheelNavigationAcceleratesDuringSustainedScrolling(t *testing.T) {
+	var wheel listWheelNavigation
+	now := time.Date(2026, time.October, 10, 12, 0, 0, 0, time.UTC)
+	earlySteps, lateSteps := 0, 0
+	for elapsed := time.Duration(0); elapsed < time.Second; elapsed += 5 * time.Millisecond {
+		if wheel.filter("scroll_down", now.Add(elapsed)) != "" {
+			if elapsed < 250*time.Millisecond {
+				earlySteps++
+			} else if elapsed >= 750*time.Millisecond {
+				lateSteps++
+			}
+		}
+	}
+	if earlySteps < 5 || lateSteps <= earlySteps || lateSteps < 12 {
+		t.Fatalf("swipe did not accelerate smoothly: early steps %d, late steps %d", earlySteps, lateSteps)
+	}
+	// An isolated tick after a pause must remain a single step even after a
+	// fast swipe, so every item can still be reached deliberately.
+	if wheel.filter("scroll_down", now.Add(2*time.Second)) == "" {
+		t.Fatal("paused swipe did not reset immediately")
+	}
+	if wheel.filter("scroll_down", now.Add(2*time.Second+20*time.Millisecond)) != "" {
+		t.Fatal("isolated tick repeated at the accelerated rate")
+	}
+}

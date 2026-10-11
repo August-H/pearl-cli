@@ -29,10 +29,12 @@ const (
 
 // OpenRouterModel is the subset of OpenRouter's /models response Pearl needs.
 type OpenRouterModel struct {
-	ID            string
-	Name          string
-	ContextLength int64
-	Created       int64
+	ID               string
+	Name             string
+	ContextLength    int64
+	Created          int64
+	InputModalities  []string
+	OutputModalities []string
 }
 
 type openRouterModelsResponse struct {
@@ -41,6 +43,10 @@ type openRouterModelsResponse struct {
 		Name          string `json:"name"`
 		Created       int64  `json:"created"`
 		ContextLength int64  `json:"context_length"`
+		Architecture  struct {
+			InputModalities  []string `json:"input_modalities"`
+			OutputModalities []string `json:"output_modalities"`
+		} `json:"architecture"`
 	} `json:"data"`
 }
 
@@ -82,10 +88,12 @@ func FetchModels(ctx context.Context) ([]OpenRouterModel, error) {
 			continue
 		}
 		models = append(models, OpenRouterModel{
-			ID:            id,
-			Name:          strings.TrimSpace(entry.Name),
-			ContextLength: entry.ContextLength,
-			Created:       entry.Created,
+			ID:               id,
+			Name:             strings.TrimSpace(entry.Name),
+			ContextLength:    entry.ContextLength,
+			Created:          entry.Created,
+			InputModalities:  entry.Architecture.InputModalities,
+			OutputModalities: entry.Architecture.OutputModalities,
 		})
 	}
 	return models, nil

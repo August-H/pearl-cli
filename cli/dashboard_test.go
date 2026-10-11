@@ -148,6 +148,86 @@ func TestDashboardJobDetailsActionsKeepExpandableView(t *testing.T) {
 	}
 }
 
+func TestDashboardJobsViewMouseNavigation(t *testing.T) {
+	view := dashboardJobsView{open: true, bodyHeight: 3}
+	now := time.Date(2026, time.October, 10, 12, 0, 0, 0, time.UTC)
+	for _, test := range []struct {
+		sequence string
+		count    int
+		selected int
+	}{
+		{"\x1b[<64;10;4M", 5, 0},
+		{"\x1b[<65;10;4M", 5, 1},
+		{"\x1b[<65;10;4M", 5, 2},
+		{"\x1b[<0;10;4M", 5, 2},
+		{"\x1b[<64;10;4M", 5, 1},
+		{"\x1b[<65;10;4M", 2, 1},
+		{"\x1b[<65;10;4M", 0, 0},
+	} {
+		action, _ := jobViewEscapeAction(test.sequence)
+		dashboardApplyJobsViewActionAt(&view, action, test.count, now)
+		now = now.Add(200 * time.Millisecond)
+		if view.selected != test.selected {
+			t.Fatalf("after %q selected %d, want %d", test.sequence, view.selected, test.selected)
+		}
+	}
+	view.confirmArchive = true
+	dashboardApplyJobsViewAction(&view, "scroll_down", 5)
+	if view.selected != 0 || !view.confirmArchive {
+		t.Fatalf("wheel changed the archive confirmation: %#v", view)
+	}
+}
+
+func TestDashboardJobsWheelBurstsCanReachEveryJob(t *testing.T) {
+	view := dashboardJobsView{open: true, bodyHeight: 3}
+	now := time.Date(2026, time.October, 10, 12, 0, 0, 0, time.UTC)
+	for selected := 1; selected < 10; selected++ {
+		for _, delay := range []time.Duration{0, 3 * time.Millisecond, 10 * time.Millisecond, 25 * time.Millisecond} {
+			action, _ := jobViewEscapeAction("\x1b[<65;10;4M")
+			redraw := dashboardApplyJobsViewActionAt(&view, action, 10, now.Add(delay))
+			if redraw != (delay == 0) {
+				t.Fatalf("wheel burst at %s redraw = %v", delay, redraw)
+			}
+			if view.selected != selected {
+				t.Fatalf("wheel burst skipped job %d: selected %d", selected, view.selected)
+			}
+		}
+		now = now.Add(150 * time.Millisecond)
+	}
+	for selected := 8; selected >= 0; selected-- {
+		for _, delay := range []time.Duration{0, 3 * time.Millisecond, 10 * time.Millisecond} {
+			action, _ := jobViewEscapeAction("\x1b[<64;10;4M")
+			dashboardApplyJobsViewActionAt(&view, action, 10, now.Add(delay))
+			if view.selected != selected {
+				t.Fatalf("reverse wheel burst skipped job %d: selected %d", selected, view.selected)
+			}
+		}
+		now = now.Add(150 * time.Millisecond)
+	}
+}
+
+func TestDashboardJobsWheelDoesNotDelayKeyboardOrDirectionChanges(t *testing.T) {
+	view := dashboardJobsView{open: true, bodyHeight: 3}
+	now := time.Date(2026, time.October, 10, 12, 0, 0, 0, time.UTC)
+	for index, test := range []struct {
+		action   string
+		selected int
+	}{
+		{"scroll_down", 1},
+		{"scroll_down", 1},
+		{"scroll_up", 0},
+		{"scroll_down", 1},
+		{"next", 2},
+		{"scroll_down", 3},
+		{"previous", 2},
+	} {
+		dashboardApplyJobsViewActionAt(&view, test.action, 10, now.Add(time.Duration(index)*time.Millisecond))
+		if view.selected != test.selected {
+			t.Fatalf("after %q selected %d, want %d", test.action, view.selected, test.selected)
+		}
+	}
+}
+
 func TestRenderDashboardSupportsNoColorAndSanitizesControlCharacters(t *testing.T) {
 	now := time.Now()
 	output := renderDashboard([]store.Job{{

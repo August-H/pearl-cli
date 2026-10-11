@@ -113,11 +113,27 @@ only the Unix socket path.
 a custom model ID. It stores the selection in the durable `settings.json`. The
 same wizard runs inside the dashboard command box when you enter `configure`.
 
-`pearl model` opens an interactive picker with every current OpenRouter model,
-grouped by provider with older generations hidden (only Fable 5.1, not Fable 5).
-The Free Tier option at the top selects `openrouter/free`. Non-interactive
-flags cover scripts and the dashboard: `pearl model --list`,
-`pearl model --set <model-id>`, and `pearl model --free`.
+`pearl model` opens a lab menu for the OpenRouter model catalog, with batch
+variants, GPT Pro models, and media generation models hidden. The menu keeps
+text chat models, including those that accept images, and hides models that
+produce images, video, or audio. Only models added to OpenRouter within the past
+calendar year appear. Models with missing dates or future dates are hidden,
+and the Free Tier router remains available. Select a lab with Enter, then select one of
+its models with Enter to save it. Starred
+labs appear first in this order: Anthropic, OpenAI, Google, Grok, DeepSeek,
+Meta, Kimi, and GLM. Use the
+arrow keys, `j`/`k`, the mouse wheel or trackpad to navigate, and `/` to search
+the current menu. Long wheel swipes accelerate in both the model picker and
+jobs lists; short ticks move one row at a time. Left arrow returns to the labs,
+and Ctrl-U clears a search.
+Outside a search, `q` goes back or closes the lab menu; Ctrl-C closes the picker
+from either menu. The Pearl lab contains the Free Tier option, `openrouter/free`.
+Inside a lab, each row shows the model's readable name, sorted newest first by
+the date it was added to OpenRouter. Enter `model` in the
+dashboard to open the same picker. The catalog refreshes every time the command
+runs, with a cached list available if the refresh fails. Use `--list` to print
+the catalog, `--set <model-id>` to set a model directly, or `--free` to use the
+Free Tier.
 
 ## Jobs and directories
 
@@ -169,9 +185,9 @@ Running `pearl` without a command opens the dashboard.
 
 `pearl jobs` lists jobs for the current directory and its subfolders. Use
 `--all` to list every workspace; the listing then adds a WORKSPACE column. In
-the selectable list, use the arrow
-keys or `j` and `k` to move between jobs, Page Up and Page Down to move faster,
-and Enter to open the selected job. Space preloads `run <job-id>` for pending
+the selectable list, use the arrow keys, the mouse wheel or trackpad, or `j`
+and `k` to move between jobs. Use Page Up and Page Down to move faster, and
+Enter to open the selected job. Space preloads `run <job-id>` for pending
 jobs, `retry <job-id>` for finished jobs, or `respond <job-id> ` for jobs waiting
 for input. The list closes and fills the terminal prompt without running the
 command. Type the response when needed, then press Enter to confirm. Press `d`

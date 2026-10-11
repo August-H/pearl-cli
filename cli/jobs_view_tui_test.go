@@ -83,3 +83,34 @@ func TestJobViewKeyboardSequences(t *testing.T) {
 		t.Fatal("partial escape sequence was treated as complete")
 	}
 }
+
+func TestJobViewMouseSequences(t *testing.T) {
+	tests := []struct {
+		name, sequence, action string
+	}{
+		{"wheel up", "\x1b[<64;20;5M", "scroll_up"},
+		{"wheel down", "\x1b[<65;20;5M", "scroll_down"},
+		{"modified wheel up", "\x1b[<92;300;50M", "scroll_up"},
+		{"modified wheel down", "\x1b[<93;300;50M", "scroll_down"},
+		{"click", "\x1b[<0;20;5M", ""},
+		{"release", "\x1b[<0;20;5m", ""},
+		{"wheel release", "\x1b[<65;20;5m", ""},
+		{"horizontal wheel", "\x1b[<66;20;5M", ""},
+		{"drag", "\x1b[<32;20;5M", ""},
+		{"missing coordinate", "\x1b[<65;20M", ""},
+		{"zero coordinate", "\x1b[<65;0;5M", ""},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			for end := 1; end < len(test.sequence); end++ {
+				if action, complete := jobViewEscapeAction(test.sequence[:end]); complete || action != "" {
+					t.Fatalf("partial report %q = %q, %v", test.sequence[:end], action, complete)
+				}
+			}
+			action, complete := jobViewEscapeAction(test.sequence)
+			if !complete || action != test.action {
+				t.Fatalf("mouse report %q = %q, %v; want %q, true", test.sequence, action, complete, test.action)
+			}
+		})
+	}
+}

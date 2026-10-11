@@ -15,7 +15,7 @@ func runModel(args []string) int {
 	var (
 		list    bool
 		free    bool
-		refresh bool
+		refresh = true
 		setID   string
 	)
 	rest := make([]string, 0, len(args))
@@ -45,7 +45,7 @@ func runModel(args []string) int {
 			fmt.Println("  --list      Print the grouped model list")
 			fmt.Println("  --set ID    Set the model directly")
 			fmt.Println("  --free      Use the Free Tier (openrouter/free)")
-			fmt.Println("  --refresh   Ignore the cached model list")
+			fmt.Println("  --refresh   Refresh the model list (the default)")
 			return 0
 		default:
 			rest = append(rest, argument)
@@ -96,18 +96,14 @@ func setModel(id string) int {
 	return 0
 }
 
-func resolveLatestModels(refresh bool) ([]openrouter_request.OpenRouterModel, bool, time.Time, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+func resolveModelCatalogue(ctx context.Context, refresh bool) ([]openrouter_request.OpenRouterModel, bool, time.Time, error) {
+	ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
 	defer cancel()
-	models, cached, fetchedAt, err := openrouter_request.ResolveModels(ctx, refresh)
-	if err != nil {
-		return nil, false, time.Time{}, err
-	}
-	return openrouter_request.SelectLatestModels(models), cached, fetchedAt, nil
+	return openrouter_request.ResolveModels(ctx, refresh)
 }
 
 func listModels(currentID string, refresh bool) int {
-	models, cached, fetchedAt, err := resolveLatestModels(refresh)
+	models, cached, fetchedAt, err := resolveModelCatalogue(context.Background(), refresh)
 	if err != nil {
 		return printError("Model", err)
 	}
@@ -116,25 +112,22 @@ func listModels(currentID string, refresh bool) int {
 	}
 	printGroupedModels(models, currentID)
 	if cached && !fetchedAt.IsZero() {
-		fmt.Fprintf(os.Stderr, "Showing cached list from %s (use --refresh to update)\n",
+		fmt.Fprintf(os.Stderr, "Could not refresh; showing cached list from %s\n",
 			fetchedAt.Local().Format("2006-01-02 15:04"))
 	}
 	return 0
 }
 
 func printGroupedModels(models []openrouter_request.OpenRouterModel, currentID string) {
-	fmt.Println()
-	fmt.Println("Pearl")
-	printModelLine(openrouter_request.FreeTierModel, "Free Tier", "", currentID)
-	lastProvider := ""
-	for _, model := range models {
-		provider := openrouter_request.ModelProvider(model.ID)
-		if provider != lastProvider {
-			fmt.Println()
-			fmt.Println(provider)
-			lastProvider = provider
+	rows := buildModelRows(models, currentID)
+	for _, lab := range buildModelLabRows(rows) {
+		fmt.Println()
+		fmt.Println(modelLabTitle(lab))
+		for _, row := range rows {
+			if row.kind == modelRowOption && row.provider == lab.provider {
+				printModelLine(row.id, row.name, row.context, currentID)
+			}
 		}
-		printModelLine(model.ID, model.Name, openrouter_request.FormatContextLength(model.ContextLength), currentID)
 	}
 }
 
@@ -166,17 +159,11 @@ func modelDisplayName(id, name string) string {
 
 func pickModel(currentID string, refresh bool) int {
 	fmt.Println("Loading models from OpenRouter…")
-	models, cached, fetchedAt, err := resolveLatestModels(refresh)
+	picker, err := loadModelPicker(context.Background(), currentID, refresh)
 	if err != nil {
 		return printError("Model", err)
 	}
-	rows := buildModelRows(models, currentID)
-	notice := ""
-	if cached && !fetchedAt.IsZero() {
-		notice = fmt.Sprintf("Cached list from %s · run with --refresh to update",
-			fetchedAt.Local().Format("2006-01-02 15:04"))
-	}
-	chosen, err := runModelTUI(os.Stdin, os.Stdout, rows, currentID, notice)
+	chosen, err := runModelTUI(os.Stdin, os.Stdout, picker.rows, currentID, picker.notice)
 	if err != nil {
 		return printError("Model", err)
 	}
@@ -185,6 +172,30 @@ func pickModel(currentID string, refresh bool) int {
 		return 0
 	}
 	return setModel(chosen)
+}
+
+func loadModelPicker(ctx context.Context, currentID string, refresh bool) (*modelPickerState, error) {
+	models, cached, fetchedAt, err := resolveModelCatalogue(ctx, refresh)
+	if err != nil {
+		return nil, err
+	}
+	notice := ""
+	if cached && !fetchedAt.IsZero() {
+		notice = fmt.Sprintf("Could not refresh · cached list from %s",
+			fetchedAt.Local().Format("2006-01-02 15:04"))
+	}
+	return newModelPickerState(buildModelRows(models, currentID), currentID, notice), nil
+}
+
+func dashboardModelPickerCommand(arguments []string) (interactive, refresh bool) {
+	refresh = true
+	for _, argument := range arguments {
+		if argument != "--refresh" {
+			return false, false
+		}
+		refresh = true
+	}
+	return true, refresh
 }
 
 func displayCurrentModel(currentID string) string {
