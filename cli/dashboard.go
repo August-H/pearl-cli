@@ -19,6 +19,7 @@ import (
 	"unicode"
 
 	"github.com/August-H/pearl-cli/internal/store"
+	"github.com/August-H/pearl-cli/openrouter_request"
 	"golang.org/x/term"
 )
 
@@ -72,6 +73,7 @@ type dashboardJobsView struct {
 	bodyHeight     int
 	confirmArchive bool
 	notice         string
+	wheel          listWheelNavigation
 }
 
 type dashboardJobDetailsView struct {
@@ -220,12 +222,13 @@ func dashboardLoop(
 	defer term.Restore(int(input.Fd()), terminalState)
 
 	fmt.Fprint(output, "\x1b[?1049h\x1b[?25l")
-	defer fmt.Fprint(output, "\x1b[?25h\x1b[?1049l")
+	defer fmt.Fprint(output, jobsListMouseDisable, "\x1b[?25h\x1b[?1049l")
 
 	sessionContext, cancelSession := context.WithCancel(ctx)
 	defer cancelSession()
 	var inputLock sync.Mutex
 	var renderLock sync.Mutex
+	mouseEnabled := false
 	commandText := ""
 	notice := ""
 	selectedSuggestion := 0
@@ -236,6 +239,7 @@ func dashboardLoop(
 	jobsView := dashboardJobsView{}
 	var jobDetailsView *dashboardJobDetailsView
 	var autonomousView *dashboardAutonomousView
+	var modelView *modelPickerState
 	dashboardWorkspace := currentWorkspace()
 	var jobsLock sync.RWMutex
 	var jobs []store.Job
@@ -316,6 +320,21 @@ func dashboardLoop(
 		width := readWidth()
 		height := dashboardHeight(input)
 		inputLock.Lock()
+		wantMouse := modelView != nil || jobsView.open && jobDetailsView == nil && autonomousView == nil
+		if wantMouse != mouseEnabled {
+			if wantMouse {
+				fmt.Fprint(output, jobsListMouseEnable)
+			} else {
+				fmt.Fprint(output, jobsListMouseDisable)
+			}
+			mouseEnabled = wantMouse
+		}
+		if modelView != nil {
+			screen := modelView.screen(width, height, color)
+			inputLock.Unlock()
+			fmt.Fprint(output, "\x1b[H", listTerminalFrame(screen.Frame))
+			return
+		}
 		if autonomousView != nil {
 			frame := renderAutonomousScreenWithHint(
 				autonomousView.details,
@@ -409,7 +428,7 @@ func dashboardLoop(
 			)
 			jobsView.bodyHeight = screen.BodyHeight
 			inputLock.Unlock()
-			fmt.Fprint(output, "\x1b[H\x1b[2J", dashboardTerminalFrame(screen.Frame))
+			fmt.Fprint(output, "\x1b[H", listTerminalFrame(screen.Frame))
 			return
 		}
 		visibleCommand := commandText
@@ -510,11 +529,19 @@ func dashboardLoop(
 			suggestionJobs, _ := jobSnapshot(snapshotArchived, snapshotShowAll)
 			inputLock.Lock()
 			switch {
+			case modelView != nil:
+				if !modelView.applyAction(action) {
+					inputLock.Unlock()
+					continue
+				}
 			case autonomousView != nil:
 			case jobDetailsView != nil:
 				dashboardApplyJobDetailsAction(jobDetailsView, action)
 			case jobsView.open:
-				dashboardApplyJobsViewAction(&jobsView, action, len(suggestionJobs))
+				if !dashboardApplyJobsViewAction(&jobsView, action, len(suggestionJobs)) {
+					inputLock.Unlock()
+					continue
+				}
 			case action == "previous" || action == "next":
 				direction := 1
 				if action == "previous" {
@@ -540,6 +567,27 @@ func dashboardLoop(
 		inputLock.Unlock()
 		navigationJobs, _ := jobSnapshot(snapshotArchived, snapshotShowAll)
 		inputLock.Lock()
+		if modelView != nil {
+			chosen, done := modelView.handleKey(character)
+			if done && chosen == "" {
+				notice = "Model unchanged: " + displayCurrentModel(modelView.currentID)
+				modelView = nil
+			}
+			inputLock.Unlock()
+			if chosen != "" {
+				_, saveErr := openrouter_request.ConfigureAgentModel(chosen)
+				inputLock.Lock()
+				if saveErr != nil {
+					modelView.notice = "Model: " + dashboardText(saveErr.Error())
+				} else {
+					modelView = nil
+					notice = "Model: " + chosen
+				}
+				inputLock.Unlock()
+			}
+			draw(false)
+			continue
+		}
 		if autonomousView != nil {
 			refreshView := false
 			switch character {
@@ -951,6 +999,43 @@ func dashboardLoop(
 				inputLock.Unlock()
 				draw(true)
 				continue
+			case "model":
+				if interactive, refresh := dashboardModelPickerCommand(parsed[1:]); interactive {
+					commandContext, cancel := context.WithCancel(sessionContext)
+					commandCancel = cancel
+					commandView = dashboardCommandView{
+						command: strings.Join(parsed, " "), running: true,
+						output: "Loading models from OpenRouter...\n",
+					}
+					commandText, selectedSuggestion = "", 0
+					inputLock.Unlock()
+					draw(false)
+					commandWait.Add(1)
+					go func() {
+						defer commandWait.Done()
+						defer cancel()
+						picker, loadErr := loadModelPicker(commandContext, currentModelID(), refresh)
+						inputLock.Lock()
+						commandView.running = false
+						commandCancel = nil
+						if commandContext.Err() != nil {
+							commandView.output = "Model selection canceled.\n"
+							commandView.exitCode = 1
+						} else if loadErr != nil {
+							commandView.output = "Model: " + loadErr.Error() + "\n"
+							commandView.exitCode = 1
+						} else {
+							commandView = dashboardCommandView{}
+							modelView = picker
+						}
+						inputLock.Unlock()
+						if sessionContext.Err() == nil {
+							draw(false)
+						}
+					}()
+					continue
+				}
+				fallthrough
 			default:
 				if _, known := dashboardCommandDescriptions[parsed[0]]; !known {
 					notice = dashboardInvalidCommandNotice(strings.Join(parsed, " "))
@@ -1017,17 +1102,31 @@ func dashboardApplyJobsViewAction(
 	view *dashboardJobsView,
 	action string,
 	jobCount int,
-) {
+) bool {
+	return dashboardApplyJobsViewActionAt(view, action, jobCount, time.Now())
+}
+
+func dashboardApplyJobsViewActionAt(
+	view *dashboardJobsView,
+	action string,
+	jobCount int,
+	now time.Time,
+) bool {
+	if view != nil && view.confirmArchive && (action == "scroll_up" || action == "scroll_down") {
+		return false
+	}
 	if view == nil || jobCount <= 0 {
 		if view != nil {
 			view.selected, view.scroll = 0, 0
+			view.wheel = listWheelNavigation{}
 		}
-		return
+		return false
 	}
+	action = view.wheel.filter(action, now)
 	switch action {
-	case "previous":
+	case "previous", "scroll_up":
 		view.selected--
-	case "next":
+	case "next", "scroll_down":
 		view.selected++
 	case "page_up":
 		view.selected -= max(1, view.bodyHeight-1)
@@ -1038,11 +1137,12 @@ func dashboardApplyJobsViewAction(
 	case "end":
 		view.selected = jobCount - 1
 	default:
-		return
+		return false
 	}
 	view.selected = min(max(0, view.selected), jobCount-1)
 	view.confirmArchive = false
 	view.notice = ""
+	return true
 }
 
 func dashboardApplyJobDetailsAction(

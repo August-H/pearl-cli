@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/August-H/pearl-cli/internal/store"
 	"golang.org/x/term"
@@ -14,6 +15,11 @@ type jobsListScreen struct {
 	Frame      string
 	BodyHeight int
 }
+
+const (
+	jobsListMouseEnable  = "\x1b[?1000h\x1b[?1006h"
+	jobsListMouseDisable = "\x1b[?1000l\x1b[?1006l"
+)
 
 type jobsListLayout struct {
 	IDWidth        int
@@ -85,11 +91,12 @@ func runJobsListTUIWithMode(
 	}
 	defer term.Restore(int(input.Fd()), terminalState)
 
-	fmt.Fprint(output, "\x1b[?1049h\x1b[?25l")
-	defer fmt.Fprint(output, "\x1b[?25h\x1b[?1049l")
+	fmt.Fprint(output, "\x1b[?1049h\x1b[?25l", jobsListMouseEnable)
+	defer fmt.Fprint(output, jobsListMouseDisable, "\x1b[?25h\x1b[?1049l")
 
 	selected := 0
 	scroll := 0
+	var wheel listWheelNavigation
 	confirmArchive := false
 	notice := ""
 	color := os.Getenv("NO_COLOR") == "" && os.Getenv("TERM") != "dumb"
@@ -129,7 +136,7 @@ func runJobsListTUIWithMode(
 			jobs, width, height, selected, scroll, color, "q exit", footer,
 			mode.title, mode.showWorkspace,
 		)
-		fmt.Fprint(output, "\x1b[H\x1b[2J", dashboardTerminalFrame(screen.Frame))
+		fmt.Fprint(output, "\x1b[H", listTerminalFrame(screen.Frame))
 		return screen
 	}
 	screen := draw()
@@ -140,6 +147,22 @@ func runJobsListTUIWithMode(
 		character, _, err := reader.ReadRune()
 		if err != nil {
 			return jobsListResult{}, err
+		}
+		action := ""
+		if escapeSequence != "" {
+			escapeSequence += string(character)
+			var complete bool
+			action, complete = jobViewEscapeAction(escapeSequence)
+			if !complete {
+				continue
+			}
+			escapeSequence = ""
+			if confirmArchive || action == "" {
+				continue
+			}
+		} else if character == '\x1b' {
+			escapeSequence = "\x1b"
+			continue
 		}
 		if confirmArchive {
 			switch character {
@@ -164,19 +187,7 @@ func runJobsListTUIWithMode(
 			screen = draw()
 			continue
 		}
-		action := ""
-		if escapeSequence != "" {
-			escapeSequence += string(character)
-			var complete bool
-			action, complete = jobViewEscapeAction(escapeSequence)
-			if !complete {
-				continue
-			}
-			escapeSequence = ""
-		} else if character == '\x1b' {
-			escapeSequence = "\x1b"
-			continue
-		} else {
+		if action == "" {
 			switch character {
 			case 3, 4, 'q', 'Q':
 				return jobsListResult{}, nil
@@ -197,6 +208,7 @@ func runJobsListTUIWithMode(
 			}
 		}
 
+		action = wheel.filter(action, time.Now())
 		switch action {
 		case "open":
 			if len(jobs) > 0 {
@@ -215,10 +227,10 @@ func runJobsListTUIWithMode(
 				confirmArchive = true
 				notice = ""
 			}
-		case "previous":
+		case "previous", "scroll_up":
 			notice = ""
 			selected--
-		case "next":
+		case "next", "scroll_down":
 			notice = ""
 			selected++
 		case "page_up":

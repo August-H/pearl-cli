@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 
 	"github.com/August-H/pearl-cli/internal/store"
@@ -152,6 +153,9 @@ func runJobDetailsTUI(
 }
 
 func jobViewEscapeAction(sequence string) (string, bool) {
+	if strings.HasPrefix(sequence, "\x1b[<") {
+		return jobViewMouseAction(sequence)
+	}
 	actions := map[string]string{
 		"\x1b[A":  "previous",
 		"\x1bOA":  "previous",
@@ -178,6 +182,39 @@ func jobViewEscapeAction(sequence string) (string, bool) {
 	for candidate := range actions {
 		if strings.HasPrefix(candidate, sequence) {
 			return "", false
+		}
+	}
+	return "", true
+}
+
+// jobViewMouseAction consumes SGR mouse reports, including clicks that have no action.
+func jobViewMouseAction(sequence string) (string, bool) {
+	last := sequence[len(sequence)-1]
+	if last == '<' || last == ';' || last >= '0' && last <= '9' {
+		return "", len(sequence) > 64
+	}
+	if last != 'M' && last != 'm' {
+		return "", true
+	}
+	fields := strings.Split(sequence[3:len(sequence)-1], ";")
+	if len(fields) != 3 {
+		return "", true
+	}
+	values := [3]int{}
+	for index, field := range fields {
+		value, err := strconv.Atoi(field)
+		if err != nil || value < 0 || index > 0 && value == 0 {
+			return "", true
+		}
+		values[index] = value
+	}
+	if last == 'M' {
+		// Shift, Alt, and Control occupy bits 2 through 4.
+		switch values[0] &^ 28 {
+		case 64:
+			return "scroll_up", true
+		case 65:
+			return "scroll_down", true
 		}
 	}
 	return "", true
