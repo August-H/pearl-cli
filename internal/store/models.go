@@ -1,6 +1,10 @@
 package store
 
-import "time"
+import (
+	"fmt"
+	"strings"
+	"time"
+)
 
 const (
 	JobQueued       = "queued"
@@ -13,10 +17,27 @@ const (
 	JobInterrupted  = "interrupted"
 )
 
+const (
+	HarnessPearl = "pearl"
+	HarnessCodex = "codex"
+)
+
+// NormalizeHarness returns the canonical harness name. An empty name means the
+// job uses the default harness from Pearl's settings when it starts.
+func NormalizeHarness(name string) (string, error) {
+	name = strings.ToLower(strings.TrimSpace(name))
+	switch name {
+	case "", HarnessPearl, HarnessCodex:
+		return name, nil
+	}
+	return "", fmt.Errorf("unknown harness %q; use %q or %q", name, HarnessPearl, HarnessCodex)
+}
+
 type Job struct {
 	ID              string     `json:"id"`
 	Prompt          string     `json:"prompt"`
 	WorkspaceRoot   string     `json:"workspace_root"`
+	Harness         string     `json:"harness,omitempty"`
 	Status          string     `json:"status"`
 	Result          string     `json:"result,omitempty"`
 	Error           string     `json:"error,omitempty"`

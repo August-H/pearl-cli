@@ -119,13 +119,39 @@ func TestChooseJobDirectoryHandlesCancellationAndRejectsFiles(t *testing.T) {
 	}
 }
 
+func TestSplitTrailingJobFlagsAcceptsFlagsAfterPrompt(t *testing.T) {
+	for _, test := range []struct {
+		args     []string
+		rest     []string
+		trailing trailingJobFlags
+	}{
+		{[]string{"-n", "docs", "update the docs", "--directory"}, []string{"-n", "docs", "update the docs"}, trailingJobFlags{chooseDirectory: true}},
+		{[]string{"update", "the", "docs", "-d"}, []string{"update", "the", "docs"}, trailingJobFlags{chooseDirectory: true}},
+		{[]string{"update the docs", "--workspace", "/tmp/repo"}, []string{"update the docs"}, trailingJobFlags{workspace: "/tmp/repo"}},
+		{[]string{"update the docs", "--workspace=/tmp/repo"}, []string{"update the docs"}, trailingJobFlags{workspace: "/tmp/repo"}},
+		{[]string{"update the docs", "-n", "docs"}, []string{"update the docs"}, trailingJobFlags{name: "docs"}},
+		{[]string{"update the docs", "--name=docs", "-d"}, []string{"update the docs"}, trailingJobFlags{name: "docs", chooseDirectory: true}},
+		{[]string{"update", "the", "docs", "--directory", "-n", "fix docs"}, []string{"update", "the", "docs"}, trailingJobFlags{name: "fix docs", chooseDirectory: true}},
+		{[]string{"update the docs", "--harness", "codex", "-n", "docs"}, []string{"update the docs"}, trailingJobFlags{name: "docs", harness: "codex"}},
+		{[]string{"update the docs", "--harness=pearl"}, []string{"update the docs"}, trailingJobFlags{harness: "pearl"}},
+		{[]string{"--directory", "-n", "docs", "update the docs"}, []string{"--directory", "-n", "docs", "update the docs"}, trailingJobFlags{}},
+		{[]string{"explain --directory flags"}, []string{"explain --directory flags"}, trailingJobFlags{}},
+		{[]string{"explain", "-n"}, []string{"explain", "-n"}, trailingJobFlags{}},
+	} {
+		rest, trailing := splitTrailingJobFlags(test.args)
+		if strings.Join(rest, "|") != strings.Join(test.rest, "|") || trailing != test.trailing {
+			t.Fatalf("splitTrailingJobFlags(%q) = %q, %+v", test.args, rest, trailing)
+		}
+	}
+}
+
 func TestJobDirectoryPickerAssignsWorkspace(t *testing.T) {
 	client := startTestDaemon(t, answerRunner{})
 	selected := t.TempDir()
 	pickerCalled := false
 	output, exitCode := captureTestStdout(t, func() int {
 		return createJobWithDirectoryPicker(
-			[]string{"--directory", "-n", "docs", "update", "the", "docs"},
+			[]string{"update", "the", "docs", "-n", "docs", "--directory"},
 			func(initial string) (string, error) {
 				pickerCalled = true
 				if _, err := validateJobDirectory(initial); err != nil {

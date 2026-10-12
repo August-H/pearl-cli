@@ -31,6 +31,7 @@ type submitRequest struct {
 	Name          string `json:"name"`
 	Prompt        string `json:"prompt"`
 	WorkspaceRoot string `json:"workspace_root"`
+	Harness       string `json:"harness"`
 }
 
 type scheduleRequest struct {
@@ -59,6 +60,8 @@ type jobDetailsResponse struct {
 	Transcript     []byte                `json:"transcript,omitempty"`
 	ToolExecutions []store.ToolExecution `json:"tool_executions"`
 	StatusEvents   []store.Event         `json:"status_events,omitempty"`
+	// Models lists the models the Free Tier router chose, in first-use order.
+	Models []string `json:"models,omitempty"`
 }
 
 func Run(ctx context.Context, paths pearlpaths.Paths, runner AgentRunner) error {
@@ -286,13 +289,24 @@ func (s *Server) handleJobs(writer http.ResponseWriter, request *http.Request) {
 			writeError(writer, http.StatusBadRequest, err)
 			return
 		}
+		harness, err := store.NormalizeHarness(input.Harness)
+		if err != nil {
+			writeError(writer, http.StatusBadRequest, err)
+			return
+		}
+		if harness == store.HarnessCodex {
+			if _, err := FindCodex(); err != nil {
+				writeError(writer, http.StatusBadRequest, err)
+				return
+			}
+		}
 		workspace, err := validateWorkspace(input.WorkspaceRoot)
 		if err != nil {
 			writeError(writer, http.StatusBadRequest, err)
 			return
 		}
-		job, err := s.store.CreatePendingNamedJob(
-			request.Context(), input.Name, input.Prompt, workspace,
+		job, err := s.store.CreatePendingJob(
+			request.Context(), input.Name, input.Prompt, workspace, harness,
 		)
 		if err != nil {
 			writeError(writer, http.StatusBadRequest, err)
@@ -377,11 +391,25 @@ func (s *Server) handleJob(writer http.ResponseWriter, request *http.Request) {
 			writeError(writer, http.StatusInternalServerError, err)
 			return
 		}
+		modelEvents, err := s.store.EventsOfType(request.Context(), jobID, "model")
+		if err != nil {
+			writeError(writer, http.StatusInternalServerError, err)
+			return
+		}
+		var models []string
+		seenModels := make(map[string]bool)
+		for _, event := range modelEvents {
+			if model := strings.TrimSpace(event.Data); model != "" && !seenModels[model] {
+				seenModels[model] = true
+				models = append(models, model)
+			}
+		}
 		writeJSON(writer, http.StatusOK, jobDetailsResponse{
 			Job:            job,
 			Transcript:     transcript,
 			ToolExecutions: toolExecutions,
 			StatusEvents:   statusEvents,
+			Models:         models,
 		})
 	case "run":
 		if request.Method != http.MethodPost {

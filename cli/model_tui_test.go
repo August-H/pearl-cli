@@ -57,31 +57,86 @@ func TestModelPickerGroupsTheFullCatalogueIntoLabs(t *testing.T) {
 	}
 }
 
-func TestModelPickerBackRestoresLabSearchAndSelection(t *testing.T) {
+func TestModelPickerLabsSearchMatchesModelNamesAcrossLabs(t *testing.T) {
 	state := newModelPickerState(buildModelRows(testModels(), ""), "", "")
 	for _, character := range "/openai" {
 		state.handleKey(character)
 	}
-	if len(state.visible) != 1 || state.visible[0].provider != "openai" {
-		t.Fatalf("lab search = %#v", state.visible)
-	}
-	state.handleKey('\r')
-	if state.lab != "openai" || state.filter != "" {
-		t.Fatalf("opening lab kept search: %#v", state)
-	}
-	state.applyAction("collapse")
-	if state.lab != "" || state.filter != "openai" || len(state.visible) != 1 {
-		t.Fatalf("back did not restore lab search: %#v", state)
+	if len(state.visible) != 0 {
+		t.Fatalf("lab name matched models: %#v", state.visible)
 	}
 	state.handleKey(21)
+	for _, character := range "/gpt" {
+		state.handleKey(character)
+	}
+	if len(state.visible) != 2 || state.visible[0].kind != modelRowHeader ||
+		state.visible[0].provider != "openai" || state.visible[1].id != "openai/gpt-5.5" {
+		t.Fatalf("model search = %#v", state.visible)
+	}
+	frame := state.screen(80, 12, false).Frame
+	for _, want := range []string{"Pearl · model · all labs", "─ OpenAI ─", "GPT-5.5"} {
+		if !strings.Contains(frame, want) {
+			t.Fatalf("search frame missing %q:\n%s", want, frame)
+		}
+	}
+	if id, done := state.handleKey('\r'); id != "openai/gpt-5.5" || !done {
+		t.Fatalf("search selection = %q, %v", id, done)
+	}
+}
+
+func TestModelPickerBackspaceNeverClosesThePicker(t *testing.T) {
+	state := newModelPickerState(buildModelRows(testModels(), ""), "", "")
+	state.handleKey('\r')
+	for _, character := range "/ab" {
+		state.handleKey(character)
+	}
+	for press := range 6 {
+		if id, done := state.handleKey(127); id != "" || done {
+			t.Fatalf("backspace %d closed the picker: %q, %v", press+1, id, done)
+		}
+	}
+	if state.lab != "" || state.filter != "" || state.filtering {
+		t.Fatalf("backspace did not return to the labs screen: %#v", state)
+	}
+	if _, done := state.handleKey(8); done {
+		t.Fatal("Ctrl-H closed the picker")
+	}
+}
+
+func TestModelPickerBackRestoresLabSelection(t *testing.T) {
+	state := newModelPickerState(buildModelRows(testModels(), ""), "", "")
 	state.applyAction("end")
 	selected := state.selected
 	state.handleKey('\r')
-	if _, done := state.handleKey('q'); done || state.lab != "" || state.selected != selected {
-		t.Fatalf("q did not return to the selected lab: %#v", state)
+	state.applyAction("collapse")
+	if state.lab != "" || state.selected != selected || len(state.visible) != 3 {
+		t.Fatalf("back did not restore labs: %#v", state)
 	}
-	if id, done := state.handleKey('q'); id != "" || !done {
-		t.Fatalf("q at labs = %q, %v", id, done)
+	state.handleKey('\r')
+	if _, done := state.handleKey(escapeKey); done || state.lab != "" || state.selected != selected {
+		t.Fatalf("Esc did not return to the selected lab: %#v", state)
+	}
+	if id, done := state.handleKey(escapeKey); id != "" || !done {
+		t.Fatalf("Esc at labs = %q, %v", id, done)
+	}
+}
+
+func TestModelPickerEscClearsSearchBeforeGoingBackAndQTypes(t *testing.T) {
+	state := newModelPickerState(buildModelRows(testModels(), ""), "", "")
+	state.handleKey('\r')
+	for _, character := range "/q" {
+		if _, done := state.handleKey(character); done {
+			t.Fatal("q closed the picker instead of typing")
+		}
+	}
+	if state.filter != "q" || state.lab == "" {
+		t.Fatalf("q did not type into the search: %#v", state)
+	}
+	if _, done := state.handleKey(escapeKey); done || state.filter != "" || state.filtering || state.lab == "" {
+		t.Fatalf("Esc did not clear the search in place: %#v", state)
+	}
+	if _, done := state.handleKey(escapeKey); done || state.lab != "" {
+		t.Fatalf("second Esc did not return to labs: %#v", state)
 	}
 }
 
@@ -93,6 +148,11 @@ func TestModelPickerSearchAcceptsNavigationLettersAndRecoversFromNoMatches(t *te
 			t.Fatal("searching for qwen closed the picker")
 		}
 	}
+	if len(state.visible) != 2 || state.visible[1].id != "qwen/qwen-model" {
+		t.Fatalf("labs search = %#v", state.visible)
+	}
+	state.handleKey(21)
+	state.applyAction("end")
 	state.handleKey('\r')
 	for _, character := range "/qwen-model" {
 		state.handleKey(character)
@@ -373,29 +433,29 @@ func TestModelPickerKeepsOnlyModelsFromPastCalendarYear(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			models := []openrouter_request.OpenRouterModel{
-				{ID: "openai/undated"},
-				{ID: "openai/expired", Created: test.cutoff.Unix() - 1},
-				{ID: "openai/boundary", Created: test.cutoff.Unix()},
-				{ID: "openai/inside", Created: test.cutoff.Unix() + 1},
-				{ID: "openai/now", Created: test.now.Unix()},
-				{ID: "openai/future", Created: test.now.Unix() + 1},
+				{ID: "qwen/undated"},
+				{ID: "qwen/expired", Created: test.cutoff.Unix() - 1},
+				{ID: "qwen/boundary", Created: test.cutoff.Unix()},
+				{ID: "qwen/inside", Created: test.cutoff.Unix() + 1},
+				{ID: "qwen/now", Created: test.now.Unix()},
+				{ID: "qwen/future", Created: test.now.Unix() + 1},
 				{ID: "oldlab/expired", Created: test.cutoff.Unix() - 1},
 			}
-			for _, currentID := range []string{"openai/expired", "openai/undated", "custom/unknown-date", "openai/inside"} {
+			for _, currentID := range []string{"qwen/expired", "qwen/undated", "custom/unknown-date", "qwen/inside"} {
 				state := newModelPickerState(buildModelRowsAt(models, currentID, test.now), currentID, "")
-				if len(state.visible) != 2 || state.visible[0].provider != "openai" || state.visible[0].name != "3 models" {
+				if len(state.visible) != 2 || state.visible[1].provider != "qwen" || state.visible[1].name != "3 models" {
 					t.Fatalf("current %q: incorrect labs/counts: %#v", currentID, state.visible)
 				}
-				state.selected = 0
+				state.selected = 1
 				state.activate()
-				want := []string{"openai/now", "openai/inside", "openai/boundary"}
+				want := []string{"qwen/now", "qwen/inside", "qwen/boundary"}
 				for index, id := range want {
 					if state.visible[index].id != id {
 						t.Fatalf("model %d = %q, want %q", index, state.visible[index].id, id)
 					}
 				}
 				state.applyAction("end")
-				if id := state.activate(); id != "openai/boundary" {
+				if id := state.activate(); id != "qwen/boundary" {
 					t.Fatalf("cutoff model selection = %q", id)
 				}
 			}
@@ -403,7 +463,30 @@ func TestModelPickerKeepsOnlyModelsFromPastCalendarYear(t *testing.T) {
 	}
 }
 
-func TestFilterModelRowsMatchesIDNameAndProvider(t *testing.T) {
+func TestModelPickerKeepsOnlyStarredLabModelsFromPastSixMonths(t *testing.T) {
+	now := time.Date(2026, 10, 10, 18, 0, 0, 0, time.UTC)
+	cutoff := time.Date(2026, 4, 10, 18, 0, 0, 0, time.UTC).Unix()
+	models := []openrouter_request.OpenRouterModel{
+		{ID: "anthropic/expired", Created: cutoff - 1},
+		{ID: "anthropic/boundary", Created: cutoff},
+		{ID: "anthropic/now", Created: now.Unix()},
+		{ID: "openai/expired", Created: cutoff - 1},
+		{ID: "meta/expired", Created: cutoff - 1},
+		{ID: "meta-llama/older", Created: cutoff - 1},
+	}
+	var got []string
+	for _, row := range buildModelRowsAt(models, "openai/expired", now) {
+		if row.kind == modelRowOption {
+			got = append(got, row.id)
+		}
+	}
+	want := []string{openrouter_request.FreeTierModel, "anthropic/now", "anthropic/boundary", "meta-llama/older"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("models = %v, want %v", got, want)
+	}
+}
+
+func TestFilterModelRowsMatchesModelNameNotLab(t *testing.T) {
 	rows := buildModelRows(testModels(), "")
 	filtered := filterModelRows(rows, "fable")
 	selectable := selectableModelIndexes(filtered)
@@ -413,8 +496,13 @@ func TestFilterModelRowsMatchesIDNameAndProvider(t *testing.T) {
 	if filtered[0].kind != modelRowHeader {
 		t.Fatalf("filtered[0] = %#v, want group header", filtered[0])
 	}
-	if got := filterModelRows(rows, "anthropic"); len(selectableModelIndexes(got)) != 1 {
-		t.Fatalf("provider filter = %#v", got)
+	if got := filterModelRows(rows, "claude-fable-5.1"); len(selectableModelIndexes(got)) != 1 {
+		t.Fatalf("ID slug filter = %#v", got)
+	}
+	for _, lab := range []string{"anthropic", "openai/", "Anthropic:"} {
+		if got := filterModelRows(rows, lab); len(selectableModelIndexes(got)) != 0 {
+			t.Fatalf("lab filter %q = %#v", lab, got)
+		}
 	}
 	if got := filterModelRows(rows, "no-such-model"); len(selectableModelIndexes(got)) != 0 {
 		t.Fatalf("empty filter = %#v", got)
@@ -434,6 +522,62 @@ func TestInitialModelSelectionPrefersCurrent(t *testing.T) {
 	rows = buildModelRows(testModels(), "")
 	if got := initialModelSelection(filterModelRows(rows, "")); got != 0 {
 		t.Fatalf("default selection = %d, want 0 (free tier)", got)
+	}
+}
+
+func TestModelPickerShowsAlignedPricesInsideALab(t *testing.T) {
+	models := recentTestModels([]openrouter_request.OpenRouterModel{
+		{ID: "anthropic/claude-fable-5.1", Name: "Anthropic: Claude Fable 5.1",
+			InputPrice: "0.000003", OutputPrice: "0.000015", CacheReadPrice: "0.0000003"},
+		{ID: "anthropic/claude-haiku-5.5", Name: "Anthropic: Claude Haiku 5.5",
+			InputPrice: "0.0000001", OutputPrice: "0.0000005"},
+		{ID: "anthropic/claude-auto", Name: "Anthropic: Auto", InputPrice: "-1", OutputPrice: "-1"},
+	})
+	state := newModelPickerState(buildModelRows(models, ""), "", "")
+	if frame := state.screen(100, 20, false).Frame; strings.Contains(frame, "in $") {
+		t.Fatalf("labs view shows prices:\n%s", frame)
+	}
+	state.handleKey('\r')
+	frame := state.screen(100, 20, false).Frame
+	var fable, haiku, auto string
+	for _, line := range strings.Split(frame, "\n") {
+		switch {
+		case strings.Contains(line, "Fable"):
+			fable = line
+		case strings.Contains(line, "Haiku"):
+			haiku = line
+		case strings.Contains(line, "Auto"):
+			auto = line
+		}
+	}
+	if !strings.HasSuffix(fable, "in $3     out $15    cache $0.30") {
+		t.Fatalf("fable row = %q", fable)
+	}
+	if !strings.HasSuffix(haiku, "in $0.10  out $0.50") {
+		t.Fatalf("haiku row = %q", haiku)
+	}
+	if strings.Index(fable, "in $") != strings.Index(haiku, "in $") {
+		t.Fatalf("price columns are not aligned:\n%s\n%s", fable, haiku)
+	}
+	if strings.Contains(auto, "$") || strings.HasSuffix(auto, " ") {
+		t.Fatalf("variable-price row = %q", auto)
+	}
+	if !strings.Contains(frame, "$ per 1M tokens") {
+		t.Fatalf("frame missing price unit:\n%s", frame)
+	}
+	if frame := state.screen(30, 20, false).Frame; strings.Contains(frame, "in $") {
+		t.Fatalf("narrow terminal kept prices:\n%s", frame)
+	}
+
+	state.back()
+	for index, lab := range state.visible {
+		if lab.provider == "Pearl" {
+			state.selected = index
+		}
+	}
+	state.activate()
+	if frame := state.screen(100, 20, false).Frame; !strings.Contains(frame, "Free Tier  free") {
+		t.Fatalf("free tier row missing free label:\n%s", frame)
 	}
 }
 

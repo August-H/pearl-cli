@@ -67,7 +67,7 @@ func runJobDetailsTUI(
 	reader := bufio.NewReader(input)
 	escapeSequence := ""
 	for {
-		character, _, err := reader.ReadRune()
+		character, err := readTerminalKey(reader)
 		if err != nil {
 			return err
 		}
@@ -85,7 +85,7 @@ func runJobDetailsTUI(
 			continue
 		} else {
 			switch character {
-			case 3, 4, 'q', 'Q':
+			case 3, 4, escapeKey:
 				return nil
 			case '\r', '\n', ' ':
 				action = "toggle"
@@ -227,7 +227,7 @@ func renderJobViewScreen(
 	color bool,
 ) jobViewScreen {
 	return renderJobViewScreenWithQuitLabel(
-		job, sections, width, height, selected, scroll, color, "q exit",
+		job, sections, width, height, selected, scroll, color, "Esc exit",
 	)
 }
 

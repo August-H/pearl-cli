@@ -131,6 +131,7 @@ ON autonomous_jobs(session_id, created_at);
 		{name: "input_tool_call_id", definition: "TEXT NOT NULL DEFAULT ''"},
 		{name: "input_response", definition: "TEXT NOT NULL DEFAULT ''"},
 		{name: "archived_at", definition: "TEXT"},
+		{name: "harness", definition: "TEXT NOT NULL DEFAULT ''"},
 	} {
 		if err := s.ensureColumn(ctx, "jobs", column.name, column.definition); err != nil {
 			return err
@@ -217,7 +218,7 @@ func scanJob(scanner interface{ Scan(...any) error }) (Job, error) {
 	err := scanner.Scan(
 		&job.ID, &job.Prompt, &job.WorkspaceRoot, &job.Status, &job.Result,
 		&job.Error, &cancelRequested, &job.Question, &job.InputToolCallID,
-		&job.InputResponse, &created, &started, &finished, &archived,
+		&job.InputResponse, &created, &started, &finished, &archived, &job.Harness,
 	)
 	if err != nil {
 		return Job{}, err
@@ -241,6 +242,6 @@ func scanJob(scanner interface{ Scan(...any) error }) (Job, error) {
 
 const jobColumns = `id, prompt, workspace_root, status, result, error,
 cancel_requested, input_question, input_tool_call_id, input_response,
-created_at, started_at, finished_at, archived_at`
+created_at, started_at, finished_at, archived_at, harness`
 
 func isNotFound(err error) bool { return errors.Is(err, sql.ErrNoRows) }

@@ -141,3 +141,23 @@ func TestFormatContextLength(t *testing.T) {
 		}
 	}
 }
+
+func TestFormatMillionTokenPrice(t *testing.T) {
+	cases := map[string]string{
+		"0.000003":     "$3",
+		"0.000015":     "$15",
+		"0.0000003":    "$0.30",
+		"0.0000027":    "$2.70",
+		"0.000000075":  "$0.075",
+		"0.0000000375": "$0.0375",
+		"0":            "$0",
+		"-1":           "",
+		"":             "",
+		"n/a":          "",
+	}
+	for perToken, want := range cases {
+		if got := FormatMillionTokenPrice(perToken); got != want {
+			t.Fatalf("FormatMillionTokenPrice(%q) = %q, want %q", perToken, got, want)
+		}
+	}
+}

@@ -157,6 +157,7 @@ func buildJobViewSections(details jobDetails) ([]jobViewSection, error) {
 		overview = append(overview, "Duration: "+duration)
 	}
 	overview = append(overview, "Directory: "+jobViewText(displayJobDirectory(job.WorkspaceRoot)))
+	overview = append(overview, "Harness: "+jobViewHarness(job))
 	sections := []jobViewSection{{
 		Title:    "Overview",
 		Summary:  job.Status,
@@ -222,12 +223,38 @@ func buildJobViewSections(details jobDetails) ([]jobViewSection, error) {
 		Title: "Transcript", Summary: jobViewCountSummary(len(transcript), "message", "messages"),
 		Lines: jobViewValueLines(transcriptOutput.String()),
 	})
+	if len(details.Models) > 0 {
+		title := "Model used"
+		if len(details.Models) > 1 {
+			title = "Models used"
+		}
+		lines := make([]string, 0, len(details.Models))
+		for _, model := range details.Models {
+			lines = append(lines, jobViewText(model))
+		}
+		sections = append(sections, jobViewSection{
+			Title: title, Summary: jobViewOneLine(strings.Join(details.Models, ", ")), Lines: lines,
+		})
+	}
 	if len(transcript) == 0 && job.Result != "" {
 		sections = append(sections, jobViewSection{
 			Title: "Result", Summary: jobViewOneLine(job.Result), Lines: jobViewValueLines(job.Result),
 		})
 	}
 	return sections, nil
+}
+
+// jobViewHarness names the harness for a job. Jobs without one either ran
+// before harnesses existed, which means Pearl's, or use the default when they start.
+func jobViewHarness(job store.Job) string {
+	switch {
+	case job.Harness != "":
+		return job.Harness
+	case job.StartedAt != nil:
+		return store.HarnessPearl
+	default:
+		return "default"
+	}
 }
 
 func writeJobViewSection(output io.Writer, title, value string) {

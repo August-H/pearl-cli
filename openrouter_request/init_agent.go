@@ -37,6 +37,9 @@ type agentMessage struct {
 	ToolCalls        []agentToolCall   `json:"tool_calls,omitempty"`
 	ToolCallID       string            `json:"tool_call_id,omitempty"`
 	Name             string            `json:"name,omitempty"`
+	// Model is the model OpenRouter routed the request to. It is never sent
+	// back in requests or stored in the transcript.
+	Model string `json:"-"`
 }
 
 type agentStreamToolCall struct {
@@ -64,6 +67,7 @@ type reasoningDetailText struct {
 }
 
 type agentStreamChunk struct {
+	Model   string `json:"model"`
 	Choices []struct {
 		Delta        agentStreamDelta `json:"delta"`
 		FinishReason string           `json:"finish_reason"`
@@ -329,6 +333,7 @@ func Run(ctx context.Context, prompt string, options RunOptions) (string, error)
 		}
 	}
 
+	routedModel := ""
 	for {
 		compactedMessages, compaction := compactAgentContext(
 			ctx,
@@ -372,6 +377,13 @@ func Run(ctx context.Context, prompt string, options RunOptions) (string, error)
 		)
 		if err != nil {
 			return "", err
+		}
+		if strings.TrimSpace(settings.Model) == FreeTierModel && options.Events != nil &&
+			assistantMessage.Model != "" && assistantMessage.Model != routedModel {
+			routedModel = assistantMessage.Model
+			if err := options.Events(AgentEvent{Type: "model", Data: routedModel}); err != nil {
+				return "", fmt.Errorf("emit model event: %w", err)
+			}
 		}
 
 		messages = append(messages, assistantMessage)
@@ -714,6 +726,9 @@ func requestAgentCompletionWithReasoning(
 				chunk.Error.Code,
 				chunk.Error.Message,
 			)
+		}
+		if assistantMessage.Model == "" {
+			assistantMessage.Model = strings.TrimSpace(chunk.Model)
 		}
 
 		for _, choice := range chunk.Choices {

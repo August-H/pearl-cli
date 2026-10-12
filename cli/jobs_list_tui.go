@@ -127,13 +127,13 @@ func runJobsListTUIWithMode(
 				"Archive %s? y confirm · n cancel", jobViewText(jobs[selected].ID),
 			)
 		} else if notice != "" {
-			footer = notice + " · " + jobsListModeFooter(mode, jobs, selected, "q exit")
+			footer = notice + " · " + jobsListModeFooter(mode, jobs, selected, "Esc exit")
 		}
 		if footer == "" {
-			footer = jobsListModeFooter(mode, jobs, selected, "q exit")
+			footer = jobsListModeFooter(mode, jobs, selected, "Esc exit")
 		}
 		screen := renderJobsListScreenCore(
-			jobs, width, height, selected, scroll, color, "q exit", footer,
+			jobs, width, height, selected, scroll, color, "Esc exit", footer,
 			mode.title, mode.showWorkspace,
 		)
 		fmt.Fprint(output, "\x1b[H", listTerminalFrame(screen.Frame))
@@ -144,7 +144,7 @@ func runJobsListTUIWithMode(
 	reader := bufio.NewReader(input)
 	escapeSequence := ""
 	for {
-		character, _, err := reader.ReadRune()
+		character, err := readTerminalKey(reader)
 		if err != nil {
 			return jobsListResult{}, err
 		}
@@ -178,7 +178,7 @@ func runJobsListTUIWithMode(
 					notice = "Archived " + jobViewText(jobID)
 				}
 				confirmArchive = false
-			case 3, 4, 'n', 'N', 'q', 'Q':
+			case 3, 4, 'n', 'N', escapeKey:
 				confirmArchive = false
 				notice = ""
 			default:
@@ -189,7 +189,7 @@ func runJobsListTUIWithMode(
 		}
 		if action == "" {
 			switch character {
-			case 3, 4, 'q', 'Q':
+			case 3, 4, escapeKey:
 				return jobsListResult{}, nil
 			case '\r', '\n':
 				action = "open"
@@ -258,7 +258,7 @@ func renderJobsListScreen(
 	color bool,
 ) jobsListScreen {
 	return renderJobsListScreenWithFooter(
-		jobs, width, height, selected, scroll, color, "q exit", "",
+		jobs, width, height, selected, scroll, color, "Esc exit", "",
 	)
 }
 

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -35,6 +36,10 @@ type OpenRouterModel struct {
 	Created          int64
 	InputModalities  []string
 	OutputModalities []string
+	// Prices are OpenRouter's per-token USD strings; "-1" means variable.
+	InputPrice     string `json:",omitempty"`
+	OutputPrice    string `json:",omitempty"`
+	CacheReadPrice string `json:",omitempty"`
 }
 
 type openRouterModelsResponse struct {
@@ -47,6 +52,11 @@ type openRouterModelsResponse struct {
 			InputModalities  []string `json:"input_modalities"`
 			OutputModalities []string `json:"output_modalities"`
 		} `json:"architecture"`
+		Pricing struct {
+			Prompt         string `json:"prompt"`
+			Completion     string `json:"completion"`
+			InputCacheRead string `json:"input_cache_read"`
+		} `json:"pricing"`
 	} `json:"data"`
 }
 
@@ -94,6 +104,9 @@ func FetchModels(ctx context.Context) ([]OpenRouterModel, error) {
 			Created:          entry.Created,
 			InputModalities:  entry.Architecture.InputModalities,
 			OutputModalities: entry.Architecture.OutputModalities,
+			InputPrice:       strings.TrimSpace(entry.Pricing.Prompt),
+			OutputPrice:      strings.TrimSpace(entry.Pricing.Completion),
+			CacheReadPrice:   strings.TrimSpace(entry.Pricing.InputCacheRead),
 		})
 	}
 	return models, nil
@@ -482,4 +495,24 @@ func FormatContextLength(length int64) string {
 	default:
 		return ""
 	}
+}
+
+// FormatMillionTokenPrice renders a per-token USD price as dollars per million
+// tokens, such as "$3", "$0.30" or "$0.075". Missing, malformed and variable
+// (negative) prices render as "".
+func FormatMillionTokenPrice(perToken string) string {
+	value, err := strconv.ParseFloat(strings.TrimSpace(perToken), 64)
+	if err != nil || value < 0 || math.IsInf(value, 0) || math.IsNaN(value) {
+		return ""
+	}
+	value *= 1_000_000
+	formatted := strconv.FormatFloat(value, 'f', 2, 64)
+	for decimals := 3; decimals <= 6; decimals++ {
+		if parsed, _ := strconv.ParseFloat(formatted, 64); math.Abs(parsed-value) < 1e-9 {
+			break
+		}
+		formatted = strconv.FormatFloat(value, 'f', decimals, 64)
+	}
+	formatted = strings.TrimSuffix(formatted, ".00")
+	return "$" + formatted
 }

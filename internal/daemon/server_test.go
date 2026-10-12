@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -204,6 +205,11 @@ func TestServerProcessesQueuedJobsWithOneAgent(t *testing.T) {
 	); err != nil {
 		t.Fatal(err)
 	}
+	for _, model := range []string{"meta/routed-a", "qwen/routed-b", "meta/routed-a"} {
+		if _, err := detailStore.AppendEvent(ctx, first.ID, "model", model); err != nil {
+			t.Fatal(err)
+		}
+	}
 	if err := detailStore.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -218,7 +224,8 @@ func TestServerProcessesQueuedJobsWithOneAgent(t *testing.T) {
 	}
 	if details.Job.ID != first.ID || string(details.Transcript) != string(transcript) ||
 		len(details.ToolExecutions) != 1 ||
-		details.ToolExecutions[0].ToolName != "write_to_file" {
+		details.ToolExecutions[0].ToolName != "write_to_file" ||
+		strings.Join(details.Models, ",") != "meta/routed-a,qwen/routed-b" {
 		t.Fatalf("job details = %#v", details)
 	}
 

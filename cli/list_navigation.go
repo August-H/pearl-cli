@@ -1,9 +1,25 @@
 package cli
 
 import (
+	"bufio"
 	"strings"
 	"time"
 )
+
+// escapeKey is what readTerminalKey returns for a lone Esc press. It is
+// negative so it can't collide with typed text or control characters.
+const escapeKey rune = -1
+
+// readTerminalKey reads one key. Terminals write escape sequences such as
+// arrow keys and mouse reports in a single burst, so an ESC byte with nothing
+// buffered behind it is the Esc key itself rather than a sequence prefix.
+func readTerminalKey(reader *bufio.Reader) (rune, error) {
+	character, _, err := reader.ReadRune()
+	if err == nil && character == '\x1b' && reader.Buffered() == 0 {
+		return escapeKey, nil
+	}
+	return character, err
+}
 
 const (
 	listWheelBurstGap      = 50 * time.Millisecond
