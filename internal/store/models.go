@@ -38,6 +38,7 @@ type Job struct {
 	Prompt          string     `json:"prompt"`
 	WorkspaceRoot   string     `json:"workspace_root"`
 	Harness         string     `json:"harness,omitempty"`
+	Folder          string     `json:"folder,omitempty"`
 	Status          string     `json:"status"`
 	Result          string     `json:"result,omitempty"`
 	Error           string     `json:"error,omitempty"`
@@ -75,6 +76,13 @@ type ToolExecution struct {
 	Arguments  string    `json:"arguments"`
 	Result     string    `json:"result"`
 	CreatedAt  time.Time `json:"created_at"`
+}
+
+// Folder groups jobs that run in one directory.
+type Folder struct {
+	Name          string    `json:"name"`
+	WorkspaceRoot string    `json:"workspace_root"`
+	CreatedAt     time.Time `json:"created_at"`
 }
 
 type Schedule struct {

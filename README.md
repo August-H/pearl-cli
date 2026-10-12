@@ -162,6 +162,28 @@ Zenity or KDialog when either is installed.
 pearl job "update the documentation" -n "fix docs" --directory
 ```
 
+## Folders
+
+A folder groups jobs that work in one directory. Create it once, then add jobs
+to it by name instead of picking a directory each time:
+
+```bash
+pearl folder create site                      # uses this directory
+pearl folder create site --workspace ~/code/site
+pearl job "fix the broken links" --folder site
+pearl folder                                  # list folders and job counts
+pearl folder edit site                        # pick a new directory
+pearl folder remove site                      # its jobs stay on the board
+```
+
+In `pearl jobs` and the dashboard's job list, folders appear above the other
+jobs. Press Enter to open one and Esc to go back. Space or `n` starts a new job
+in it, `e` opens the directory picker to move it, and `f` starts a new folder.
+
+Moving a folder moves its jobs too, so pending and finished jobs run in the new
+directory next time. Running jobs and jobs waiting for an answer keep the
+directory they started in.
+
 ## Harnesses
 
 A harness is the agent loop that does the work. Pearl ships its own, and it
@@ -171,10 +193,14 @@ use the OpenRouter model and API key you set with `pearl model` and
 
 ```bash
 pearl job "fix the failing tests" --harness codex
-pearl harness            # show the default harness
+pearl harness            # pick the default harness from a menu
 pearl harness codex      # run new jobs with Codex by default
 pearl harness pearl      # switch back
 ```
+
+The menu lists every harness and marks the current one. Codex shows as not
+installed when Pearl can't find it. When output isn't a terminal, `pearl
+harness` prints the current default instead.
 
 Jobs created without `--harness` use the default when they start, and
 `pearl jobs view` shows which harness ran each job. Codex must be installed
@@ -184,8 +210,13 @@ find it.
 Codex jobs run in Codex's `workspace-write` sandbox: commands can change files
 in the job directory but have no network access. Pearl ignores your
 `~/.codex/config.toml` for these runs so its OpenRouter settings apply. A
-retried Codex job resumes its Codex session. Codex has no way to pause and ask
-a question, so `pearl respond` does not apply to Codex jobs. Codex also sends a
+retried Codex job resumes its Codex session.
+
+Pearl tells Codex to start its final message with `PEARL_QUESTION:` when it
+needs something from you. The job then pauses like any other job that is
+waiting for input, and `pearl respond <job-id> "answer"` sends your answer back
+into the same Codex session. Weaker models sometimes ask in plain text instead,
+in which case the job finishes with the question as its result. Codex also sends a
 much larger prompt with each request than Pearl's harness, which costs more on
 paid models. Autonomous mode always uses Pearl's harness for its own planning.
 

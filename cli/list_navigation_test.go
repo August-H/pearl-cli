@@ -39,8 +39,17 @@ func TestListTerminalFrameClearsStaleRowsWithoutScrollingBottom(t *testing.T) {
 		if strings.Contains(got, "\x1b[2J") || strings.HasSuffix(got, "\n") {
 			t.Fatalf("frame blanks the screen or scrolls at the bottom: %q", got)
 		}
-		if strings.Count(got, "\r\n") != 3 || !strings.Contains(got, "Short row\x1b[K\r\n\x1b[K\r\n") || !strings.HasSuffix(got, "Footer\x1b[K\x1b[J") {
+		if strings.Count(got, "\r\n") != 3 || !strings.Contains(got, "\x1b[2KShort row\r\n\x1b[2K\r\n") || !strings.HasSuffix(got, "\x1b[JFooter") {
 			t.Fatalf("frame leaves stale row content: %q", got)
+		}
+	}
+}
+
+func TestListTerminalFrameNeverErasesAfterARowIsWritten(t *testing.T) {
+	got := listTerminalFrame("Title      18:38:45\n────────\nFooter  1/2")
+	for _, row := range []string{"18:38:45", "────────", "1/2"} {
+		if strings.Contains(got, row+"\x1b[") {
+			t.Fatalf("an erase follows %q and would clip its last column: %q", row, got)
 		}
 	}
 }

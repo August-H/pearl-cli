@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -35,10 +36,8 @@ func writeFakeCodex(t *testing.T, events []string, exitCode int) (script, record
 	directory := t.TempDir()
 	record = filepath.Join(directory, "record")
 	eventsFile := filepath.Join(directory, "events.jsonl")
-	if err := os.WriteFile(eventsFile, []byte(strings.Join(events, "\n")+"\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
 	script = filepath.Join(directory, "codex")
+	setFakeCodexEvents(t, script, events)
 	contents := `#!/bin/sh
 printf '%s\n' "$@" > "` + record + `.args"
 printf '%s' "$` + codexAPIKeyEnvironment + `" > "` + record + `.key"
@@ -51,6 +50,14 @@ exit ` + string(rune('0'+exitCode)) + `
 		t.Fatal(err)
 	}
 	return script, record
+}
+
+func setFakeCodexEvents(t *testing.T, script string, events []string) {
+	t.Helper()
+	eventsFile := filepath.Join(filepath.Dir(script), "events.jsonl")
+	if err := os.WriteFile(eventsFile, []byte(strings.Join(events, "\n")+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func readCodexRecord(t *testing.T, record, suffix string) string {
@@ -130,8 +137,11 @@ func TestCodexRunnerUsesOpenRouterAndRecordsTheRun(t *testing.T) {
 	if key := readCodexRecord(t, record, ".key"); key != "test-key" {
 		t.Fatalf("Codex API key = %q", key)
 	}
-	if stdin := readCodexRecord(t, record, ".stdin"); stdin != "list the files" {
+	if stdin := readCodexRecord(t, record, ".stdin"); stdin != "list the files"+codexQuestionReminder {
 		t.Fatalf("Codex prompt = %q", stdin)
+	}
+	if !strings.Contains(joined, "developer_instructions=") || !strings.Contains(joined, codexQuestionMarker) {
+		t.Fatalf("Codex arguments are missing the question instructions: %q", arguments)
 	}
 	if cwd := strings.TrimSpace(readCodexRecord(t, record, ".cwd")); cwd != workspace {
 		t.Fatalf("Codex ran in %q, want %q", cwd, workspace)
@@ -168,11 +178,104 @@ func TestCodexRunnerUsesOpenRouterAndRecordsTheRun(t *testing.T) {
 	if arguments[1] != "resume" || arguments[len(arguments)-2] != "thread-1" {
 		t.Fatalf("retry arguments = %q", arguments)
 	}
-	if stdin := readCodexRecord(t, record, ".stdin"); stdin != codexContinuePrompt {
+	if stdin := readCodexRecord(t, record, ".stdin"); stdin != codexContinuePrompt+codexQuestionReminder {
 		t.Fatalf("retry prompt = %q", stdin)
 	}
 	if executions, err := state.ListToolExecutions(ctx, job.ID); err != nil || len(executions) != 4 {
 		t.Fatalf("tool executions after retry = %d, %v", len(executions), err)
+	}
+}
+
+func TestCodexQuestionsPauseTheJobAndTheAnswerResumesCodex(t *testing.T) {
+	writeCodexTestConfig(t, `{"model":"openrouter/free"}`)
+	script, record := writeFakeCodex(t, []string{
+		`{"type":"thread.started","thread_id":"thread-q"}`,
+		`{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"Looking around."}}`,
+		`{"type":"item.completed","item":{"id":"item_1","type":"agent_message","text":"\n\nPEARL_QUESTION: Which file\nshould I fix?"}}`,
+		`{"type":"turn.completed","usage":{}}`,
+	}, 0)
+	state, err := store.Open(filepath.Join(t.TempDir(), "pearl.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = state.Close() })
+	ctx := context.Background()
+	if _, err := state.CreateJob(ctx, "fix the bug", t.TempDir()); err != nil {
+		t.Fatal(err)
+	}
+	job, found, err := state.ClaimNextJob(ctx)
+	if err != nil || !found {
+		t.Fatalf("claim job: found=%v err=%v", found, err)
+	}
+	var emitted []string
+	events := func(event openrouter_request.AgentEvent) error {
+		emitted = append(emitted, event.Type+"="+event.Data)
+		_, err := state.AppendEvent(ctx, job.ID, event.Type, event.Data)
+		return err
+	}
+	runner := CodexRunner{Executable: script}
+
+	_, err = runner.Run(ctx, job, events, state)
+	var inputRequired *openrouter_request.UserInputRequiredError
+	if !errors.As(err, &inputRequired) || inputRequired.Question != "Which file\nshould I fix?" ||
+		!strings.HasPrefix(inputRequired.ToolCallID, codexQuestionIDPrefix) {
+		t.Fatalf("Run() error = %v", err)
+	}
+	for _, event := range emitted {
+		if strings.Contains(event, codexQuestionMarker) {
+			t.Fatalf("the question marker leaked into events: %q", emitted)
+		}
+	}
+	if err := state.PauseForInput(ctx, job.ID, inputRequired.ToolCallID, inputRequired.Question); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := state.RespondToJob(ctx, job.ID, "main.go"); err != nil {
+		t.Fatal(err)
+	}
+	job, found, err = state.ClaimNextJob(ctx)
+	if err != nil || !found {
+		t.Fatalf("claim answered job: found=%v err=%v", found, err)
+	}
+
+	setFakeCodexEvents(t, script, []string{
+		`{"type":"thread.started","thread_id":"thread-q"}`,
+		`{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"Fixed main.go."}}`,
+		`{"type":"turn.completed","usage":{}}`,
+	})
+	result, err := runner.Run(ctx, job, events, state)
+	if err != nil || result != "Fixed main.go." {
+		t.Fatalf("answered Run() = %q, %v", result, err)
+	}
+	arguments := strings.Split(strings.TrimSpace(readCodexRecord(t, record, ".args")), "\n")
+	if arguments[1] != "resume" || arguments[len(arguments)-2] != "thread-q" {
+		t.Fatalf("answered run arguments = %q", arguments)
+	}
+	if stdin := readCodexRecord(t, record, ".stdin"); stdin != "main.go"+codexQuestionReminder {
+		t.Fatalf("answered run prompt = %q", stdin)
+	}
+
+	// A later retry continues the session instead of resending the answer.
+	if _, err := runner.Run(ctx, job, events, state); err != nil {
+		t.Fatal(err)
+	}
+	if stdin := readCodexRecord(t, record, ".stdin"); stdin != codexContinuePrompt+codexQuestionReminder {
+		t.Fatalf("retry prompt = %q", stdin)
+	}
+}
+
+func TestCodexQuestionFindsTheMarker(t *testing.T) {
+	for message, want := range map[string]string{
+		"PEARL_QUESTION: Which branch?":                    "Which branch?",
+		"I looked around.\nPEARL_QUESTION: Use tabs?":      "Use tabs?",
+		"  PEARL_QUESTION:\nWhich one?\nA or B":            "Which one?\nA or B",
+		"**PEARL_QUESTION: What format?**\n- JSON\n- YAML": "What format?\n- JSON\n- YAML",
+		"> **PEARL_QUESTION:** Which port?":                "Which port?",
+		"Done. No PEARL_QUESTION: needed here":             "",
+		"All finished.":                                    "",
+	} {
+		if got := codexQuestion(message); got != want {
+			t.Fatalf("codexQuestion(%q) = %q, want %q", message, got, want)
+		}
 	}
 }
 
@@ -200,11 +303,12 @@ func TestCodexRunnerReportsAFailedTurn(t *testing.T) {
 
 func TestCodexDisplayCommandRemovesTheShellWrapper(t *testing.T) {
 	for input, want := range map[string]string{
-		"/bin/zsh -lc ls":                "ls",
-		"/bin/bash -lc 'git status'":     "git status",
-		`/bin/zsh -lc "go test ./..."`:   "go test ./...",
-		`/bin/zsh -lc 'echo '\''hi'\'''`: "echo 'hi'",
-		"python3 script.py":              "python3 script.py",
+		"/bin/zsh -lc ls":                                 "ls",
+		"/bin/bash -lc 'git status'":                      "git status",
+		`/bin/zsh -lc "go test ./..."`:                    "go test ./...",
+		`/bin/zsh -lc 'echo '\''hi'\'''`:                  "echo 'hi'",
+		"python3 script.py":                               "python3 script.py",
+		"/bin/zsh -lc \"cat > a.json << 'EOF'\n{}\nEOF\"": "cat > a.json << 'EOF'\n{}\nEOF",
 	} {
 		if got := codexDisplayCommand(input); got != want {
 			t.Fatalf("codexDisplayCommand(%q) = %q, want %q", input, got, want)

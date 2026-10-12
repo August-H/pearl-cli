@@ -33,7 +33,19 @@ func (s *Store) CreatePendingJob(
 	ctx context.Context,
 	name, prompt, workspaceRoot, harness string,
 ) (Job, error) {
-	return s.createJob(ctx, name, prompt, workspaceRoot, harness, JobPending)
+	return s.createJob(ctx, name, prompt, workspaceRoot, harness, "", JobPending)
+}
+
+// CreatePendingFolderJob creates a pending job in folder, which supplies the
+// job's directory.
+func (s *Store) CreatePendingFolderJob(
+	ctx context.Context,
+	name, prompt, harness, folder string,
+) (Job, error) {
+	if strings.TrimSpace(folder) == "" {
+		return Job{}, errors.New("folder cannot be empty")
+	}
+	return s.createJob(ctx, name, prompt, "", harness, folder, JobPending)
 }
 
 // SetJobHarness records the harness that runs a job.
@@ -50,12 +62,12 @@ func (s *Store) createNamedJob(
 	ctx context.Context,
 	name, prompt, workspaceRoot, status string,
 ) (Job, error) {
-	return s.createJob(ctx, name, prompt, workspaceRoot, "", status)
+	return s.createJob(ctx, name, prompt, workspaceRoot, "", "", status)
 }
 
 func (s *Store) createJob(
 	ctx context.Context,
-	name, prompt, workspaceRoot, harness, status string,
+	name, prompt, workspaceRoot, harness, folder, status string,
 ) (Job, error) {
 	name = strings.TrimSpace(name)
 	if err := ValidateJobName(name); err != nil {
@@ -69,6 +81,7 @@ func (s *Store) createJob(
 		Prompt:        prompt,
 		WorkspaceRoot: workspaceRoot,
 		Harness:       harness,
+		Folder:        strings.TrimSpace(folder),
 		Status:        status,
 		CreatedAt:     time.Now().UTC(),
 	}
@@ -77,6 +90,17 @@ func (s *Store) createJob(
 		return Job{}, err
 	}
 	defer transaction.Rollback()
+	if job.Folder != "" {
+		err := transaction.QueryRowContext(
+			ctx, "SELECT workspace_root FROM folders WHERE name = ?", job.Folder,
+		).Scan(&job.WorkspaceRoot)
+		if errors.Is(err, sql.ErrNoRows) {
+			return Job{}, fmt.Errorf("folder %q not found", job.Folder)
+		}
+		if err != nil {
+			return Job{}, fmt.Errorf("load folder: %w", err)
+		}
+	}
 	if name == "" {
 		job.ID, err = availableJobID(ctx, transaction)
 		if err != nil {
@@ -96,9 +120,9 @@ func (s *Store) createJob(
 		}
 	}
 	if _, err := transaction.ExecContext(ctx, `
-INSERT INTO jobs(id, prompt, workspace_root, status, created_at, harness)
-VALUES (?, ?, ?, ?, ?, ?)`, job.ID, job.Prompt, job.WorkspaceRoot, job.Status,
-		job.CreatedAt.Format(time.RFC3339Nano), job.Harness); err != nil {
+INSERT INTO jobs(id, prompt, workspace_root, status, created_at, harness, folder)
+VALUES (?, ?, ?, ?, ?, ?, ?)`, job.ID, job.Prompt, job.WorkspaceRoot, job.Status,
+		job.CreatedAt.Format(time.RFC3339Nano), job.Harness, job.Folder); err != nil {
 		return Job{}, err
 	}
 	if _, err := appendEventTx(ctx, transaction, job.ID, "status", job.Status); err != nil {
@@ -593,7 +617,10 @@ func (s *Store) RespondToJob(ctx context.Context, id, response string) (Job, int
 		return Job{}, 0, err
 	}
 	if job.Status != JobWaitingInput {
-		return Job{}, 0, fmt.Errorf("job %q is not waiting for input", id)
+		return Job{}, 0, fmt.Errorf(
+			"job %q is %s, not waiting for an answer; only paused jobs take answers",
+			id, job.Status,
+		)
 	}
 	if job.InputToolCallID == "" {
 		return Job{}, 0, fmt.Errorf("job %q has no pending input request", id)

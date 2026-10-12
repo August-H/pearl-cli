@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -39,27 +40,11 @@ type jobsListMode struct {
 	allowActions  bool
 	showWorkspace bool
 	archiveJob    func(string) error
-}
-
-func runJobsListTUI(
-	input, output *os.File,
-	jobs []store.Job,
-	archiveJob func(string) error,
-) (jobsListResult, error) {
-	return runJobsListTUIWithMode(input, output, jobs, jobsListMode{
-		title: "Pearl", allowActions: true, archiveJob: archiveJob,
-	})
-}
-
-func runJobsListTUIShowingWorkspace(
-	input, output *os.File,
-	jobs []store.Job,
-	archiveJob func(string) error,
-) (jobsListResult, error) {
-	return runJobsListTUIWithMode(input, output, jobs, jobsListMode{
-		title: "Pearl · all workspaces", allowActions: true,
-		showWorkspace: true, archiveJob: archiveJob,
-	})
+	// workspace limits top-level rows to one directory; empty shows every one.
+	workspace     string
+	folders       []store.Folder
+	moveFolder    func(name, directory string) (store.Folder, error)
+	pickDirectory func(string) (string, error)
 }
 
 func runArchivedJobsListTUI(
@@ -80,6 +65,276 @@ func runArchivedJobsListTUIShowingWorkspace(
 	})
 }
 
+// jobsListState is the jobs list with its folders, independent of the terminal.
+type jobsListState struct {
+	mode           jobsListMode
+	jobs           []store.Job
+	entries        []jobsListEntry
+	openFolder     string
+	selected       int
+	scroll         int
+	bodyHeight     int
+	confirmArchive bool
+	notice         string
+	wheel          listWheelNavigation
+}
+
+func newJobsListState(jobs []store.Job, mode jobsListMode) *jobsListState {
+	state := &jobsListState{mode: mode, jobs: jobs}
+	state.refresh()
+	return state
+}
+
+func (s *jobsListState) refresh() {
+	s.entries = buildJobsListEntries(s.jobs, s.mode.folders, s.mode.workspace, s.openFolder)
+	s.selected = min(max(0, s.selected), max(0, len(s.entries)-1))
+}
+
+func (s *jobsListState) current() (jobsListEntry, bool) {
+	if len(s.entries) == 0 {
+		return jobsListEntry{}, false
+	}
+	return s.entries[min(max(0, s.selected), len(s.entries)-1)], true
+}
+
+func (s *jobsListState) folder(name string) (store.Folder, bool) {
+	for _, folder := range s.mode.folders {
+		if folder.Name == name {
+			return folder, true
+		}
+	}
+	return store.Folder{}, false
+}
+
+func (s *jobsListState) screen(width, height int, color bool) jobsListScreen {
+	height = max(8, height)
+	bodyHeight := height - 5
+	if len(s.entries) > 0 {
+		s.selected = min(max(0, s.selected), len(s.entries)-1)
+		if s.selected < s.scroll {
+			s.scroll = s.selected
+		} else if s.selected >= s.scroll+bodyHeight {
+			s.scroll = s.selected - bodyHeight + 1
+		}
+		s.scroll = min(max(0, s.scroll), max(0, len(s.entries)-bodyHeight))
+	} else {
+		s.selected, s.scroll = 0, 0
+	}
+	footer := jobsListEntriesFooter(
+		s.entries, s.selected, "Esc exit", s.mode.allowActions, s.openFolder,
+	)
+	if s.openFolder != "" {
+		footer = jobsListEntriesFooter(
+			s.entries, s.selected, "Esc back", s.mode.allowActions, s.openFolder,
+		)
+	}
+	if entry, ok := s.current(); s.confirmArchive && ok {
+		footer = fmt.Sprintf("Archive %s? y confirm · n cancel", jobViewText(entry.job.ID))
+	} else if s.notice != "" {
+		footer = s.notice + " · " + footer
+	}
+	title := s.mode.title
+	empty := ""
+	if s.openFolder != "" {
+		title += " · " + s.openFolder
+		empty = "No jobs in this folder yet. Press n to create one."
+	}
+	screen := renderJobsListEntriesScreen(s.entries, width, height, s.selected, s.scroll, color, jobsListView{
+		title: title, footer: footer, empty: empty, showWorkspace: s.mode.showWorkspace,
+	})
+	s.bodyHeight = screen.BodyHeight
+	return screen
+}
+
+// handle applies a key, or an escape-sequence action when action is set. It
+// returns the list's result once done, and whether the screen changed.
+func (s *jobsListState) handle(character rune, action string, now time.Time) (jobsListResult, bool, bool) {
+	if s.confirmArchive {
+		if action != "" {
+			return jobsListResult{}, false, false
+		}
+		switch character {
+		case '\r', '\n', 'y', 'Y':
+			s.archiveSelected()
+		case 3, 4, 'n', 'N', escapeKey:
+			s.confirmArchive = false
+			s.notice = ""
+		default:
+			return jobsListResult{}, false, false
+		}
+		return jobsListResult{}, false, true
+	}
+	if action == "" {
+		switch character {
+		case 3, 4:
+			return jobsListResult{}, true, false
+		case escapeKey:
+			if s.openFolder == "" {
+				return jobsListResult{}, true, false
+			}
+			s.closeFolder()
+			return jobsListResult{}, false, true
+		case '\r', '\n':
+			action = "open"
+		case ' ':
+			action = "preload"
+		case 'd', 'D':
+			action = "delete"
+		case 'e', 'E':
+			action = "folder_directory"
+		case 'n':
+			action = "new_job"
+		case 'f':
+			action = "new_folder"
+		case '\t', 'j':
+			action = "next"
+		case 'k':
+			action = "previous"
+		case 'g':
+			action = "home"
+		case 'G':
+			action = "end"
+		}
+	}
+	action = s.wheel.filter(action, now)
+	entry, hasEntry := s.current()
+	switch action {
+	case "open":
+		if !hasEntry {
+			return jobsListResult{}, false, false
+		}
+		if entry.isFolder() {
+			s.openFolder, s.selected, s.scroll, s.notice = entry.folder.Name, 0, 0, ""
+			s.refresh()
+			return jobsListResult{}, false, true
+		}
+		return jobsListResult{JobID: entry.job.ID}, true, false
+	case "preload":
+		if !s.mode.allowActions || !hasEntry {
+			return jobsListResult{}, false, false
+		}
+		if entry.isFolder() {
+			return jobsListResult{Preload: jobsListFolderJobCommand(entry.folder.Name)}, true, false
+		}
+		if command := jobsListPreloadCommand(entry.job); command != "" {
+			return jobsListResult{Preload: command}, true, false
+		}
+		return jobsListResult{}, false, false
+	case "new_job":
+		if s.mode.allowActions && s.openFolder != "" {
+			return jobsListResult{Preload: jobsListFolderJobCommand(s.openFolder)}, true, false
+		}
+		return jobsListResult{}, false, false
+	case "new_folder":
+		if s.mode.allowActions && s.openFolder == "" {
+			return jobsListResult{Preload: "folder create "}, true, false
+		}
+		return jobsListResult{}, false, false
+	case "folder_directory":
+		if !s.mode.allowActions {
+			return jobsListResult{}, false, false
+		}
+		s.editFolderDirectory()
+		return jobsListResult{}, false, true
+	case "delete":
+		if s.mode.archiveJob == nil || !hasEntry || entry.isFolder() {
+			return jobsListResult{}, false, false
+		}
+		s.confirmArchive, s.notice = true, ""
+		return jobsListResult{}, false, true
+	case "previous", "scroll_up":
+		s.selected--
+	case "next", "scroll_down":
+		s.selected++
+	case "page_up":
+		s.selected -= max(1, s.bodyHeight-1)
+	case "page_down":
+		s.selected += max(1, s.bodyHeight-1)
+	case "home":
+		s.selected = 0
+	case "end":
+		s.selected = len(s.entries) - 1
+	default:
+		return jobsListResult{}, false, false
+	}
+	s.notice = ""
+	s.selected = min(max(0, s.selected), max(0, len(s.entries)-1))
+	return jobsListResult{}, false, true
+}
+
+func (s *jobsListState) closeFolder() {
+	name := s.openFolder
+	s.openFolder, s.notice = "", ""
+	s.refresh()
+	for index, entry := range s.entries {
+		if entry.isFolder() && entry.folder.Name == name {
+			s.selected = index
+		}
+	}
+}
+
+func (s *jobsListState) archiveSelected() {
+	s.confirmArchive = false
+	entry, ok := s.current()
+	if !ok || entry.isFolder() {
+		return
+	}
+	jobID := entry.job.ID
+	if s.mode.archiveJob == nil {
+		s.notice = "Archive failed: unavailable"
+		return
+	}
+	if err := s.mode.archiveJob(jobID); err != nil {
+		s.notice = "Archive failed: " + dashboardText(err.Error())
+		return
+	}
+	for index, job := range s.jobs {
+		if job.ID == jobID {
+			s.jobs = append(s.jobs[:index], s.jobs[index+1:]...)
+			break
+		}
+	}
+	s.refresh()
+	s.notice = "Archived " + jobViewText(jobID)
+}
+
+// editFolderDirectory opens a directory picker for the open or selected folder.
+func (s *jobsListState) editFolderDirectory() {
+	name := s.openFolder
+	if entry, ok := s.current(); name == "" && ok && entry.isFolder() {
+		name = entry.folder.Name
+	}
+	folder, found := s.folder(name)
+	if !found {
+		s.notice = "Select a folder to change its directory"
+		return
+	}
+	if s.mode.pickDirectory == nil || s.mode.moveFolder == nil {
+		s.notice = "Folder failed: changing directories is unavailable"
+		return
+	}
+	directory, err := s.mode.pickDirectory(folder.WorkspaceRoot)
+	if errors.Is(err, errDirectoryPickerCancelled) {
+		s.notice = "Directory unchanged"
+		return
+	}
+	if err == nil {
+		folder, err = s.mode.moveFolder(folder.Name, directory)
+	}
+	if err != nil {
+		s.notice = "Folder failed: " + dashboardText(err.Error())
+		return
+	}
+	for index := range s.mode.folders {
+		if s.mode.folders[index].Name == folder.Name {
+			s.mode.folders[index] = folder
+		}
+	}
+	moveFolderJobs(s.jobs, folder)
+	s.refresh()
+	s.notice = "Moved " + folder.Name + " to " + displayJobDirectory(folder.WorkspaceRoot)
+}
+
 func runJobsListTUIWithMode(
 	input, output *os.File,
 	jobs []store.Job,
@@ -94,13 +349,9 @@ func runJobsListTUIWithMode(
 	fmt.Fprint(output, "\x1b[?1049h\x1b[?25l", jobsListMouseEnable)
 	defer fmt.Fprint(output, jobsListMouseDisable, "\x1b[?25h\x1b[?1049l")
 
-	selected := 0
-	scroll := 0
-	var wheel listWheelNavigation
-	confirmArchive := false
-	notice := ""
+	state := newJobsListState(jobs, mode)
 	color := os.Getenv("NO_COLOR") == "" && os.Getenv("TERM") != "dumb"
-	draw := func() jobsListScreen {
+	draw := func() {
 		width, height, sizeErr := term.GetSize(int(output.Fd()))
 		if sizeErr != nil || width <= 0 {
 			width = 80
@@ -108,38 +359,10 @@ func runJobsListTUIWithMode(
 		if sizeErr != nil || height <= 0 {
 			height = 24
 		}
-		height = max(8, height)
-		bodyHeight := height - 5
-		if len(jobs) > 0 {
-			selected = min(max(0, selected), len(jobs)-1)
-			if selected < scroll {
-				scroll = selected
-			} else if selected >= scroll+bodyHeight {
-				scroll = selected - bodyHeight + 1
-			}
-			scroll = min(max(0, scroll), max(0, len(jobs)-bodyHeight))
-		} else {
-			selected, scroll = 0, 0
-		}
-		footer := ""
-		if confirmArchive && len(jobs) > 0 {
-			footer = fmt.Sprintf(
-				"Archive %s? y confirm · n cancel", jobViewText(jobs[selected].ID),
-			)
-		} else if notice != "" {
-			footer = notice + " · " + jobsListModeFooter(mode, jobs, selected, "Esc exit")
-		}
-		if footer == "" {
-			footer = jobsListModeFooter(mode, jobs, selected, "Esc exit")
-		}
-		screen := renderJobsListScreenCore(
-			jobs, width, height, selected, scroll, color, "Esc exit", footer,
-			mode.title, mode.showWorkspace,
-		)
+		screen := state.screen(width, height, color)
 		fmt.Fprint(output, "\x1b[H", listTerminalFrame(screen.Frame))
-		return screen
 	}
-	screen := draw()
+	draw()
 
 	reader := bufio.NewReader(input)
 	escapeSequence := ""
@@ -157,98 +380,21 @@ func runJobsListTUIWithMode(
 				continue
 			}
 			escapeSequence = ""
-			if confirmArchive || action == "" {
+			if action == "" {
 				continue
 			}
+			character = 0
 		} else if character == '\x1b' {
 			escapeSequence = "\x1b"
 			continue
 		}
-		if confirmArchive {
-			switch character {
-			case '\r', '\n', 'y', 'Y':
-				jobID := jobs[selected].ID
-				if mode.archiveJob == nil {
-					notice = "Archive failed: unavailable"
-				} else if err := mode.archiveJob(jobID); err != nil {
-					notice = "Archive failed: " + dashboardText(err.Error())
-				} else {
-					jobs = append(jobs[:selected], jobs[selected+1:]...)
-					selected = min(selected, len(jobs)-1)
-					notice = "Archived " + jobViewText(jobID)
-				}
-				confirmArchive = false
-			case 3, 4, 'n', 'N', escapeKey:
-				confirmArchive = false
-				notice = ""
-			default:
-				continue
-			}
-			screen = draw()
-			continue
+		result, done, redraw := state.handle(character, action, time.Now())
+		if done {
+			return result, nil
 		}
-		if action == "" {
-			switch character {
-			case 3, 4, escapeKey:
-				return jobsListResult{}, nil
-			case '\r', '\n':
-				action = "open"
-			case ' ':
-				action = "preload"
-			case 'd', 'D':
-				action = "delete"
-			case '\t', 'j':
-				action = "next"
-			case 'k':
-				action = "previous"
-			case 'g':
-				action = "home"
-			case 'G':
-				action = "end"
-			}
+		if redraw {
+			draw()
 		}
-
-		action = wheel.filter(action, time.Now())
-		switch action {
-		case "open":
-			if len(jobs) > 0 {
-				return jobsListResult{JobID: jobs[selected].ID}, nil
-			}
-			continue
-		case "preload":
-			if mode.allowActions && len(jobs) > 0 {
-				if command := jobsListPreloadCommand(jobs[selected]); command != "" {
-					return jobsListResult{Preload: command}, nil
-				}
-			}
-			continue
-		case "delete":
-			if mode.archiveJob != nil && len(jobs) > 0 {
-				confirmArchive = true
-				notice = ""
-			}
-		case "previous", "scroll_up":
-			notice = ""
-			selected--
-		case "next", "scroll_down":
-			notice = ""
-			selected++
-		case "page_up":
-			notice = ""
-			selected -= max(1, screen.BodyHeight-1)
-		case "page_down":
-			notice = ""
-			selected += max(1, screen.BodyHeight-1)
-		case "home":
-			notice = ""
-			selected = 0
-		case "end":
-			notice = ""
-			selected = len(jobs) - 1
-		default:
-			continue
-		}
-		screen = draw()
 	}
 }
 
@@ -320,26 +466,61 @@ func renderJobsListScreenCore(
 	title string,
 	showWorkspace bool,
 ) jobsListScreen {
+	entries := make([]jobsListEntry, len(jobs))
+	for index, job := range jobs {
+		entries[index] = jobsListEntry{job: job}
+	}
+	if footer == "" {
+		footer = jobsListFooter(jobs, selected, quitLabel)
+	}
+	return renderJobsListEntriesScreen(entries, width, height, selected, scroll, color, jobsListView{
+		title: title, footer: footer, showWorkspace: showWorkspace,
+	})
+}
+
+type jobsListView struct {
+	title         string
+	footer        string
+	empty         string
+	showWorkspace bool
+}
+
+func renderJobsListEntriesScreen(
+	entries []jobsListEntry,
+	width, height, selected, scroll int,
+	color bool,
+	view jobsListView,
+) jobsListScreen {
 	width = max(20, width)
 	height = max(8, height)
 	bodyHeight := height - 5
 	layout := calculateJobsListLayout(width)
-	if showWorkspace {
+	if view.showWorkspace {
 		layout = calculateJobsListLayoutWithWorkspace(width)
 	}
-	if len(jobs) == 0 {
+	if len(entries) == 0 {
 		selected, scroll = 0, 0
 	} else {
-		selected = min(max(0, selected), len(jobs)-1)
-		scroll = min(max(0, scroll), max(0, len(jobs)-bodyHeight))
+		selected = min(max(0, selected), len(entries)-1)
+		scroll = min(max(0, scroll), max(0, len(entries)-bodyHeight))
 	}
-	end := min(len(jobs), scroll+bodyHeight)
+	end := min(len(entries), scroll+bodyHeight)
 
 	var frame strings.Builder
+	title := view.title
 	if title == "" {
 		title = "Pearl"
 	}
-	count := jobViewCountSummary(len(jobs), "job", "jobs")
+	folders := 0
+	for _, entry := range entries {
+		if entry.isFolder() {
+			folders++
+		}
+	}
+	count := jobViewCountSummary(len(entries)-folders, "job", "jobs")
+	if folders > 0 {
+		count = jobViewCountSummary(folders, "folder", "folders") + " · " + count
+	}
 	if len([]rune(title))+len([]rune(count))+1 <= width {
 		title += strings.Repeat(" ", width-len([]rune(title))-len([]rune(count))) + count
 	}
@@ -347,35 +528,42 @@ func renderJobsListScreenCore(
 	divider := strings.Repeat("─", width)
 	fmt.Fprintln(&frame, dashboardPaint(color, ansiDim, divider))
 	fmt.Fprintln(&frame, renderJobsListHeader(layout, color))
-	if len(jobs) == 0 {
-		fmt.Fprintln(&frame, dashboardPaint(color, ansiDim, "  No jobs recorded."))
+	if len(entries) == 0 {
+		empty := view.empty
+		if empty == "" {
+			empty = "No jobs recorded."
+		}
+		fmt.Fprintln(&frame, dashboardPaint(color, ansiDim, dashboardTruncate("  "+empty, width)))
 	}
 	for index := scroll; index < end; index++ {
-		fmt.Fprintln(&frame, renderJobsListRow(jobs[index], layout, index == selected, color))
+		entry := entries[index]
+		if entry.isFolder() {
+			fmt.Fprintln(&frame, renderJobsListFolderRow(entry, layout, index == selected, color))
+		} else {
+			fmt.Fprintln(&frame, renderJobsListRow(entry.job, layout, index == selected, color))
+		}
 	}
 	usedRows := end - scroll
-	if len(jobs) == 0 {
+	if len(entries) == 0 {
 		usedRows = 1
 	}
 	for row := usedRows; row < bodyHeight; row++ {
 		fmt.Fprintln(&frame)
 	}
 	fmt.Fprintln(&frame, dashboardPaint(color, ansiDim, divider))
-	hint := footer
-	if hint == "" {
-		hint = jobsListFooter(jobs, selected, quitLabel)
-	}
+	hint := view.footer
 	position := "0/0"
-	if len(jobs) > 0 {
-		position = fmt.Sprintf("%d/%d", selected+1, len(jobs))
+	if len(entries) > 0 {
+		position = fmt.Sprintf("%d/%d", selected+1, len(entries))
 	}
 	if len([]rune(hint))+len([]rune(position))+1 <= width {
 		hint += strings.Repeat(" ", width-len([]rune(hint))-len([]rune(position))) + position
 	}
 	footerColor := ansiDim
-	if strings.HasPrefix(hint, "Archive ") || strings.HasPrefix(hint, "Archive failed:") {
+	if strings.HasPrefix(hint, "Archive ") || strings.HasPrefix(hint, "Archive failed:") ||
+		strings.HasPrefix(hint, "Folder failed:") {
 		footerColor = ansiRed
-	} else if strings.HasPrefix(hint, "Archived ") {
+	} else if strings.HasPrefix(hint, "Archived ") || strings.HasPrefix(hint, "Moved ") {
 		footerColor = ansiGreen
 	}
 	fmt.Fprintln(&frame, dashboardPaint(color, footerColor, dashboardTruncate(hint, width)))
@@ -524,6 +712,42 @@ func renderJobsListRow(
 	}
 	if layout.PromptWidth > 0 {
 		line += "  " + jobsListCell(dashboardText(job.Prompt), layout.PromptWidth)
+	}
+	return line
+}
+
+func renderJobsListFolderRow(
+	entry jobsListEntry,
+	layout jobsListLayout,
+	selected, color bool,
+) string {
+	prefix := "  "
+	if selected {
+		prefix = "› "
+	}
+	folder := entry.folder
+	name := jobsListCell(dashboardText(folder.Name)+"/", layout.IDWidth)
+	count := jobsListCell(jobViewCountSummary(entry.jobCount, "job", "jobs"), layout.StatusWidth)
+	if color {
+		if selected {
+			prefix = dashboardPaint(true, ansiBold+ansiCyan, prefix)
+			name = dashboardPaint(true, ansiBold+ansiCyan, name)
+		} else {
+			name = dashboardPaint(true, ansiBold+ansiYellow, name)
+		}
+		count = dashboardPaint(true, ansiDim, count)
+	}
+	line := prefix + name + "  " + count
+	if layout.CreatedWidth > 0 {
+		line += "  " + jobsListCell(formatJobCreatedAt(folder.CreatedAt), layout.CreatedWidth)
+	}
+	directory := workspaceBoardLabel(folder.WorkspaceRoot)
+	if layout.WorkspaceWidth > 0 {
+		line += "  " + jobsListCell(directory, layout.WorkspaceWidth)
+		directory = ""
+	}
+	if layout.PromptWidth > 0 {
+		line += "  " + jobsListCell(directory, layout.PromptWidth)
 	}
 	return line
 }

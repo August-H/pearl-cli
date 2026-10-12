@@ -93,15 +93,22 @@ func (c *daemonClient) submitNamed(
 	ctx context.Context,
 	name, prompt, workspace string,
 ) (store.Job, error) {
-	return c.submitJob(ctx, name, prompt, workspace, "")
+	return c.submitJob(ctx, name, prompt, workspace, "", "")
 }
 
+// submitJob creates a pending job. A folder supplies the directory, so
+// workspace is ignored when folder is set.
 func (c *daemonClient) submitJob(
 	ctx context.Context,
-	name, prompt, workspace, harness string,
+	name, prompt, workspace, harness, folder string,
 ) (store.Job, error) {
 	var job store.Job
-	input := map[string]string{"prompt": prompt, "workspace_root": workspace}
+	input := map[string]string{"prompt": prompt}
+	if folder = strings.TrimSpace(folder); folder != "" {
+		input["folder"] = folder
+	} else {
+		input["workspace_root"] = workspace
+	}
 	if name = strings.TrimSpace(name); name != "" {
 		input["name"] = name
 	}
@@ -110,6 +117,34 @@ func (c *daemonClient) submitJob(
 	}
 	err := c.request(ctx, http.MethodPost, "/v1/jobs", input, &job)
 	return job, err
+}
+
+func (c *daemonClient) folders(ctx context.Context) ([]store.Folder, error) {
+	var folders []store.Folder
+	err := c.request(ctx, http.MethodGet, "/v1/folders", nil, &folders)
+	return folders, err
+}
+
+func (c *daemonClient) createFolder(ctx context.Context, name, workspace string) (store.Folder, error) {
+	var folder store.Folder
+	err := c.request(ctx, http.MethodPost, "/v1/folders", map[string]string{
+		"name": name, "workspace_root": workspace,
+	}, &folder)
+	return folder, err
+}
+
+func (c *daemonClient) setFolderWorkspace(
+	ctx context.Context,
+	name, workspace string,
+) (store.Folder, error) {
+	var folder store.Folder
+	err := c.request(ctx, http.MethodPatch, "/v1/folders/"+url.PathEscape(name),
+		map[string]string{"workspace_root": workspace}, &folder)
+	return folder, err
+}
+
+func (c *daemonClient) deleteFolder(ctx context.Context, name string) error {
+	return c.request(ctx, http.MethodDelete, "/v1/folders/"+url.PathEscape(name), nil, nil)
 }
 
 func (c *daemonClient) jobs(ctx context.Context) ([]store.Job, error) {
