@@ -156,6 +156,9 @@ func buildJobViewSections(details jobDetails) ([]jobViewSection, error) {
 	if duration := jobViewDuration(job, details.StatusEvents); duration != "" {
 		overview = append(overview, "Duration: "+duration)
 	}
+	if job.Folder != "" {
+		overview = append(overview, "Folder: "+jobViewText(job.Folder))
+	}
 	overview = append(overview, "Directory: "+jobViewText(displayJobDirectory(job.WorkspaceRoot)))
 	overview = append(overview, "Harness: "+jobViewHarness(job))
 	sections := []jobViewSection{{

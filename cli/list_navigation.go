@@ -60,7 +60,18 @@ func (wheel *listWheelNavigation) filter(action string, now time.Time) string {
 
 // Overwrite rows in place without blanking the screen between wheel reports.
 // Avoid a final newline, which would scroll the frame off the terminal bottom.
+// listTerminalFrame clears each row before drawing it. Clearing after a row
+// that fills the terminal width would erase its last character, because the
+// cursor waits on the final column.
 func listTerminalFrame(frame string) string {
-	frame = strings.TrimSuffix(frame, "\n")
-	return strings.ReplaceAll(frame, "\n", "\x1b[K\r\n") + "\x1b[K\x1b[J"
+	lines := strings.Split(strings.TrimSuffix(frame, "\n"), "\n")
+	var output strings.Builder
+	for index, line := range lines {
+		if index == len(lines)-1 {
+			output.WriteString("\x1b[J" + line)
+			break
+		}
+		output.WriteString("\x1b[2K" + line + "\r\n")
+	}
+	return output.String()
 }

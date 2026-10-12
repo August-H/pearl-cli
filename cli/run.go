@@ -35,10 +35,15 @@ Usage:
   pearl --workspace <path> <command>                      Run a command in a workspace
   pearl job "prompt" [-n name] [-d | --workspace path]    Create a pending job
     --harness pearl|codex                                 Choose the agent harness for this job
+    -f, --folder name                                     Create the job in a folder
+  pearl folder [list]                                      List job folders
+    create <name> [-d | --workspace path]                   Create a folder for a directory
+    edit <name> [--workspace path]                         Change a folder's directory
+    remove <name>                                          Remove a folder and keep its jobs
   pearl run [--detach] <job-id>                            Run or retry a job
   pearl configure                                          Set the API key and model
   pearl model [--list] [--set <model-id>] [--free]         Browse and set the model
-  pearl harness [pearl|codex]                              Show or set the default agent harness
+  pearl harness [pearl|codex]                              Choose the default agent harness
   pearl jobs [--all]                                       List jobs for this directory
     view <job-id>                                           Show job details and transcript
   pearl archive [--all]                                    List archived jobs
@@ -130,6 +135,8 @@ func Run(args []string) int {
 		return runHarness(args[1:])
 	case "job":
 		return createJob(args[1:])
+	case "folder", "folders":
+		return runFolder(args[1:])
 	case "run":
 		return runJob(args[1:])
 	case "daemon":
@@ -187,23 +194,26 @@ func runHarness(args []string) int {
 		fmt.Fprintln(os.Stderr, harnessUsage)
 		return 2
 	}
-	if len(args) == 0 {
-		fmt.Println("Harness:", daemon.DefaultHarness())
-		return 0
-	}
-	harness, err := store.NormalizeHarness(args[0])
-	if err == nil && harness == "" {
-		err = errors.New("harness cannot be empty")
-	}
-	if err != nil {
-		return printError("Harness", err)
-	}
-	if harness == store.HarnessCodex {
-		if _, err := daemon.FindCodex(); err != nil {
+	current := daemon.DefaultHarness()
+	choice := ""
+	if len(args) == 1 {
+		choice = args[0]
+	} else if term.IsTerminal(int(os.Stdin.Fd())) && term.IsTerminal(int(os.Stdout.Fd())) {
+		chosen, err := runHarnessTUI(os.Stdin, os.Stdout, current)
+		if err != nil {
 			return printError("Harness", err)
 		}
+		if chosen == "" || chosen == current {
+			fmt.Println("Harness unchanged:", current)
+			return 0
+		}
+		choice = chosen
+	} else {
+		fmt.Println("Harness:", current)
+		return 0
 	}
-	if _, err := openrouter_request.ConfigureDefaultHarness(harness); err != nil {
+	harness, err := saveDefaultHarness(choice)
+	if err != nil {
 		return printError("Harness", err)
 	}
 	fmt.Println("Harness:", harness)
@@ -355,6 +365,7 @@ type trailingJobFlags struct {
 	chooseDirectory bool
 	workspace       string
 	harness         string
+	folder          string
 }
 
 // splitTrailingJobFlags removes flags that follow the prompt, as in
@@ -382,6 +393,12 @@ func splitTrailingJobFlags(args []string) ([]string, trailingJobFlags) {
 		case strings.HasPrefix(last, "--harness="):
 			trailing.harness = strings.TrimPrefix(last, "--harness=")
 			rest = rest[:len(rest)-1]
+		case strings.HasPrefix(last, "-f="), strings.HasPrefix(last, "--folder="):
+			_, trailing.folder, _ = strings.Cut(last, "=")
+			rest = rest[:len(rest)-1]
+		case previous == "-f" || previous == "--folder":
+			trailing.folder = last
+			rest = rest[:len(rest)-2]
 		case previous == "--workspace":
 			trailing.workspace = last
 			rest = rest[:len(rest)-2]
@@ -410,10 +427,13 @@ func createJobWithDirectoryPicker(
 	workspacePath := flags.String("workspace", "", "workspace directory path (no picker)")
 	flags.BoolVar(chooseDirectory, "directory", false, "choose the job directory")
 	harness := flags.String("harness", "", "agent harness: pearl or codex")
+	folder := flags.String("f", "", "folder to create the job in")
+	flags.StringVar(folder, "folder", "", "folder to create the job in")
 	flags.Usage = func() {
-		fmt.Fprintln(flags.Output(), `Usage: pearl job "prompt" [-n name] [--harness pearl|codex] [-d | --workspace path]`)
+		fmt.Fprintln(flags.Output(), `Usage: pearl job "prompt" [-n name] [--harness pearl|codex] [-f folder | -d | --workspace path]`)
 		fmt.Fprintln(flags.Output(), "  -n, --name name   Use a custom job ID, up to 20 characters")
 		fmt.Fprintln(flags.Output(), "  --harness name    Run with Pearl's harness or Codex (default: pearl harness setting)")
+		fmt.Fprintln(flags.Output(), "  -f, --folder name Create the job in a folder and use its directory")
 		fmt.Fprintln(flags.Output(), "  -d, --directory   Open a directory picker")
 		fmt.Fprintln(flags.Output(), "  --workspace path  Use a directory without opening a picker")
 	}
@@ -436,6 +456,9 @@ func createJobWithDirectoryPicker(
 	if trailing.harness != "" {
 		*harness = trailing.harness
 	}
+	if trailing.folder != "" {
+		*folder = trailing.folder
+	}
 	prompt := strings.TrimSpace(strings.Join(flags.Args(), " "))
 	if prompt == "" {
 		flags.Usage()
@@ -450,6 +473,15 @@ func createJobWithDirectoryPicker(
 	}
 	if *chooseDirectory && *workspacePath != "" {
 		return printError("Job", errors.New("use either --directory or --workspace"))
+	}
+	if *folder = strings.TrimSpace(*folder); *folder != "" {
+		if *chooseDirectory || *workspacePath != "" {
+			return printError("Job", errors.New("a folder sets the directory; drop --directory or --workspace"))
+		}
+		if err := ensureDaemonRunning(); err != nil {
+			return printError("Job", err)
+		}
+		return createPendingJobInFolder(*name, prompt, "", selectedHarness, *folder)
 	}
 	workspace, err := os.Getwd()
 	if err != nil {
@@ -532,6 +564,10 @@ func ensureDaemonRunning() error {
 }
 
 func createPendingJob(name, prompt, workspace, harness string) int {
+	return createPendingJobInFolder(name, prompt, workspace, harness, "")
+}
+
+func createPendingJobInFolder(name, prompt, workspace, harness, folder string) int {
 	prompt = strings.TrimSpace(prompt)
 	if prompt == "" {
 		fmt.Fprintln(os.Stderr, "Prompt cannot be empty")
@@ -542,12 +578,18 @@ func createPendingJob(name, prompt, workspace, harness string) int {
 		return printError("Pearl", err)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	job, err := client.submitJob(ctx, strings.TrimSpace(name), prompt, workspace, harness)
+	job, err := client.submitJob(ctx, strings.TrimSpace(name), prompt, workspace, harness, folder)
 	cancel()
 	if err != nil {
 		return printError("Pearl", err)
 	}
 	fmt.Println("Job:", job.ID)
+	if job.Folder != "" {
+		fmt.Println("Folder:", job.Folder)
+	}
+	if job.WorkspaceRoot != "" {
+		workspace = job.WorkspaceRoot
+	}
 	fmt.Println("Directory:", displayJobDirectory(workspace))
 	if job.Harness != "" {
 		fmt.Println("Harness:", job.Harness)
@@ -680,27 +722,33 @@ func listJobs(showAll bool) int {
 	if err != nil {
 		return printError("Jobs", err)
 	}
-	if !showAll {
-		jobs = filterJobsForWorkspace(jobs, currentWorkspace())
-	}
 	if term.IsTerminal(int(os.Stdin.Fd())) && term.IsTerminal(int(os.Stdout.Fd())) {
-		listTUI := runJobsListTUI
-		if showAll {
-			listTUI = runJobsListTUIShowingWorkspace
-		}
-		selection, err := listTUI(
-			os.Stdin, os.Stdout, jobs,
-			func(jobID string) error {
+		mode := jobsListMode{
+			title: "Pearl", allowActions: true, workspace: currentWorkspace(),
+			archiveJob: func(jobID string) error {
 				requestContext, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 				defer cancel()
 				return client.archiveJob(requestContext, jobID)
 			},
-		)
+			moveFolder: func(name, directory string) (store.Folder, error) {
+				requestContext, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				defer cancel()
+				return client.setFolderWorkspace(requestContext, name, directory)
+			},
+			pickDirectory: chooseJobDirectory,
+		}
+		if showAll {
+			mode.title, mode.showWorkspace, mode.workspace = "Pearl · all workspaces", true, ""
+		}
+		requestContext, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		mode.folders, _ = client.folders(requestContext)
+		cancel()
+		selection, err := runJobsListTUIWithMode(os.Stdin, os.Stdout, jobs, mode)
 		if err != nil {
 			return printError("Jobs", err)
 		}
 		if selection.Preload != "" {
-			if err := preloadTerminalInput(os.Stdin, selection.Preload); err != nil {
+			if err := preloadTerminalInput(os.Stdin, "pearl "+selection.Preload); err != nil {
 				return printError("Preload", err)
 			}
 			return 0
@@ -709,6 +757,9 @@ func listJobs(showAll bool) int {
 			return viewJob(selection.JobID)
 		}
 		return 0
+	}
+	if !showAll {
+		jobs = filterJobsForWorkspace(jobs, currentWorkspace())
 	}
 	color := os.Getenv("NO_COLOR") == "" && os.Getenv("TERM") != "dumb" &&
 		term.IsTerminal(int(os.Stdout.Fd()))
@@ -721,6 +772,9 @@ func listJobs(showAll bool) int {
 		jobBoardPaint(color, ansiBold+ansiCyan, "STATUS"))
 	for _, job := range jobs {
 		prompt := jobBoardText(job.Prompt)
+		if job.Folder != "" {
+			prompt = "[" + singleLineTableText(job.Folder) + "] " + prompt
+		}
 		row := fmt.Sprintf("%s\t%s\t%s\t", job.ID,
 			jobBoardStatus(job.Status, color),
 			formatJobCreatedAt(job.CreatedAt))

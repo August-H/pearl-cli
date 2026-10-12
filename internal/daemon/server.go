@@ -32,6 +32,12 @@ type submitRequest struct {
 	Prompt        string `json:"prompt"`
 	WorkspaceRoot string `json:"workspace_root"`
 	Harness       string `json:"harness"`
+	Folder        string `json:"folder"`
+}
+
+type folderRequest struct {
+	Name          string `json:"name"`
+	WorkspaceRoot string `json:"workspace_root"`
 }
 
 type scheduleRequest struct {
@@ -160,6 +166,8 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("/v1/archive", s.handleArchive)
 	mux.HandleFunc("/v1/autonomous", s.handleAutonomous)
 	mux.HandleFunc("/v1/autonomous/", s.handleAutonomousSession)
+	mux.HandleFunc("/v1/folders", s.handleFolders)
+	mux.HandleFunc("/v1/folders/", s.handleFolder)
 	mux.HandleFunc("/v1/schedules", s.handleSchedules)
 	mux.HandleFunc("/v1/schedules/", s.handleSchedule)
 	mux.HandleFunc("/v1/shutdown", s.handleShutdown)
@@ -300,14 +308,31 @@ func (s *Server) handleJobs(writer http.ResponseWriter, request *http.Request) {
 				return
 			}
 		}
-		workspace, err := validateWorkspace(input.WorkspaceRoot)
-		if err != nil {
-			writeError(writer, http.StatusBadRequest, err)
-			return
+		var job store.Job
+		if folderName := strings.TrimSpace(input.Folder); folderName != "" {
+			folder, folderErr := s.store.GetFolder(request.Context(), folderName)
+			if folderErr != nil {
+				writeError(writer, http.StatusBadRequest, folderErr)
+				return
+			}
+			if _, err := validateWorkspace(folder.WorkspaceRoot); err != nil {
+				writeError(writer, http.StatusBadRequest, fmt.Errorf("folder %q: %w", folder.Name, err))
+				return
+			}
+			job, err = s.store.CreatePendingFolderJob(
+				request.Context(), input.Name, input.Prompt, harness, folder.Name,
+			)
+		} else {
+			var workspace string
+			workspace, err = validateWorkspace(input.WorkspaceRoot)
+			if err != nil {
+				writeError(writer, http.StatusBadRequest, err)
+				return
+			}
+			job, err = s.store.CreatePendingJob(
+				request.Context(), input.Name, input.Prompt, workspace, harness,
+			)
 		}
-		job, err := s.store.CreatePendingJob(
-			request.Context(), input.Name, input.Prompt, workspace, harness,
-		)
 		if err != nil {
 			writeError(writer, http.StatusBadRequest, err)
 			return
@@ -599,6 +624,72 @@ func (s *Server) handleSchedule(writer http.ResponseWriter, request *http.Reques
 		return
 	}
 	writer.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) handleFolders(writer http.ResponseWriter, request *http.Request) {
+	switch request.Method {
+	case http.MethodGet:
+		folders, err := s.store.ListFolders(request.Context())
+		if err != nil {
+			writeError(writer, http.StatusInternalServerError, err)
+			return
+		}
+		writeJSON(writer, http.StatusOK, folders)
+	case http.MethodPost:
+		var input folderRequest
+		if err := decodeJSON(request, &input); err != nil {
+			writeError(writer, http.StatusBadRequest, err)
+			return
+		}
+		workspace, err := validateWorkspace(input.WorkspaceRoot)
+		if err != nil {
+			writeError(writer, http.StatusBadRequest, err)
+			return
+		}
+		folder, err := s.store.CreateFolder(request.Context(), input.Name, workspace)
+		if err != nil {
+			writeError(writer, http.StatusBadRequest, err)
+			return
+		}
+		writeJSON(writer, http.StatusCreated, folder)
+	default:
+		methodNotAllowed(writer)
+	}
+}
+
+func (s *Server) handleFolder(writer http.ResponseWriter, request *http.Request) {
+	name := strings.Trim(strings.TrimPrefix(request.URL.Path, "/v1/folders/"), "/")
+	if name == "" || strings.Contains(name, "/") {
+		http.NotFound(writer, request)
+		return
+	}
+	switch request.Method {
+	case http.MethodPatch:
+		var input folderRequest
+		if err := decodeJSON(request, &input); err != nil {
+			writeError(writer, http.StatusBadRequest, err)
+			return
+		}
+		workspace, err := validateWorkspace(input.WorkspaceRoot)
+		if err != nil {
+			writeError(writer, http.StatusBadRequest, err)
+			return
+		}
+		folder, err := s.store.SetFolderWorkspace(request.Context(), name, workspace)
+		if err != nil {
+			writeError(writer, http.StatusBadRequest, err)
+			return
+		}
+		writeJSON(writer, http.StatusOK, folder)
+	case http.MethodDelete:
+		if err := s.store.DeleteFolder(request.Context(), name); err != nil {
+			writeError(writer, http.StatusNotFound, err)
+			return
+		}
+		writer.WriteHeader(http.StatusNoContent)
+	default:
+		methodNotAllowed(writer)
+	}
 }
 
 func (s *Server) handleShutdown(writer http.ResponseWriter, request *http.Request) {

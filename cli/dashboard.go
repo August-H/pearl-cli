@@ -19,6 +19,7 @@ import (
 	"time"
 	"unicode"
 
+	"github.com/August-H/pearl-cli/internal/daemon"
 	"github.com/August-H/pearl-cli/internal/store"
 	"github.com/August-H/pearl-cli/openrouter_request"
 	"golang.org/x/term"
@@ -67,6 +68,7 @@ type dashboardCommandView struct {
 	configureStep dashboardConfigureStep
 	recalling     bool
 	model         string
+	harness       string
 }
 
 const dashboardHistoryLimit = 100
@@ -120,6 +122,7 @@ type dashboardJobsView struct {
 	open           bool
 	archived       bool
 	showAll        bool
+	folder         string
 	selected       int
 	scroll         int
 	bodyHeight     int
@@ -178,9 +181,12 @@ var dashboardCommandOptions = []dashboardCommandSuggestion{
 	{usage: "job <prompt> -n <name>", completion: "job ", description: "Give the job a custom ID"},
 	{usage: "job <prompt> [-n name] --directory", completion: "job ", description: "Choose the job directory"},
 	{usage: "job <prompt> --harness codex", completion: "job ", description: "Run this job with Codex"},
-	{usage: "harness", completion: "harness", description: "Show the default agent harness"},
-	{usage: "harness codex", completion: "harness codex", description: "Run new jobs with Codex"},
-	{usage: "harness pearl", completion: "harness pearl", description: "Run new jobs with Pearl's harness"},
+	{usage: "job <prompt> --folder <name>", completion: "job ", description: "Create a job in a folder"},
+	{usage: "harness", completion: "harness", description: "Choose the default agent harness"},
+	{usage: "folder", completion: "folder", description: "List job folders"},
+	{usage: "folder create <name>", completion: "folder create ", description: "Create a folder for this directory"},
+	{usage: "folder edit <name>", completion: "folder edit ", description: "Change a folder's directory"},
+	{usage: "folder remove <name>", completion: "folder remove ", description: "Remove a folder and keep its jobs"},
 	{usage: "status", completion: "status", description: "Show daemon and queue status"},
 	{usage: "update", completion: "update", description: "Update Pearl to the latest release"},
 	{usage: "attach <job-id>", completion: "attach ", description: "Stream a job's output"},
@@ -209,11 +215,12 @@ var dashboardCommandDescriptions = map[string]string{
 	"run":        "Run or retry a job",
 	"configure":  "Set the API key and model",
 	"model":      "Browse and set the model",
-	"harness":    "Show or set the default agent harness",
+	"harness":    "Choose the default agent harness",
 	"jobs":       "List the job board",
 	"archive":    "List archived jobs",
 	"autonomous": "Open or start autonomous mode",
 	"job":        "Create a job",
+	"folder":     "Manage job folders",
 	"status":     "Show daemon and queue status",
 	"update":     "Update Pearl to the latest release",
 	"attach":     "Stream a job's output",
@@ -292,6 +299,7 @@ func dashboardLoop(
 	selectedSuggestion := 0
 	var history dashboardHistory
 	currentModel := currentModelID()
+	currentHarness := daemon.DefaultHarness()
 	commandView := dashboardCommandView{}
 	configureAPIKey := ""
 	var commandCancel context.CancelFunc
@@ -300,6 +308,7 @@ func dashboardLoop(
 	var jobDetailsView *dashboardJobDetailsView
 	var autonomousView *dashboardAutonomousView
 	var modelView *modelPickerState
+	var harnessView *harnessPickerState
 	dashboardWorkspace := currentWorkspace()
 	var jobsLock sync.RWMutex
 	var jobs []store.Job
@@ -314,12 +323,30 @@ func dashboardLoop(
 		}
 		return append([]store.Job(nil), jobs...), loadErr
 	}
-	jobSnapshot := func(archived, showAll bool) ([]store.Job, error) {
-		loaded, err := loadJobs(archived)
-		if !showAll && err == nil {
-			loaded = filterJobsForWorkspace(loaded, dashboardWorkspace)
+	var folders []store.Folder
+	findFolder := func(name string) (store.Folder, bool) {
+		jobsLock.RLock()
+		defer jobsLock.RUnlock()
+		for _, folder := range folders {
+			if folder.Name == name {
+				return folder, true
+			}
 		}
-		return loaded, err
+		return store.Folder{}, false
+	}
+	entriesSnapshot := func(archived, showAll bool, openFolder string) []jobsListEntry {
+		loaded, _ := loadJobs(archived)
+		workspace := dashboardWorkspace
+		if showAll {
+			workspace = ""
+		}
+		if archived {
+			return buildJobsListEntries(loaded, nil, workspace, "")
+		}
+		jobsLock.RLock()
+		loadedFolders := append([]store.Folder(nil), folders...)
+		jobsLock.RUnlock()
+		return buildJobsListEntries(loaded, loadedFolders, workspace, openFolder)
 	}
 	draw := func(refreshJobs bool) {
 		renderLock.Lock()
@@ -327,6 +354,7 @@ func dashboardLoop(
 		inputLock.Lock()
 		archiveOpen := jobsView.open && jobsView.archived
 		jobsShowAll := jobsView.showAll
+		openFolder := jobsView.folder
 		autonomousID := ""
 		if autonomousView != nil {
 			autonomousID = autonomousView.sessionID
@@ -334,8 +362,10 @@ func dashboardLoop(
 		inputLock.Unlock()
 		if refreshJobs {
 			model := currentModelID()
+			harness := daemon.DefaultHarness()
 			inputLock.Lock()
 			currentModel = model
+			currentHarness = harness
 			inputLock.Unlock()
 			requestContext, cancel := context.WithTimeout(sessionContext, 2*time.Second)
 			if autonomousID != "" {
@@ -354,14 +384,19 @@ func dashboardLoop(
 				inputLock.Unlock()
 			} else {
 				var loadedJobs []store.Job
-				var loadedErr error
+				var loadedFolders []store.Folder
+				var loadedErr, foldersErr error
 				if archiveOpen {
 					loadedJobs, loadedErr = client.archivedJobs(requestContext)
 				} else {
 					loadedJobs, loadedErr = client.jobs(requestContext)
+					loadedFolders, foldersErr = client.folders(requestContext)
 				}
 				cancel()
 				jobsLock.Lock()
+				if !archiveOpen && foldersErr == nil {
+					folders = loadedFolders
+				}
 				if archiveOpen {
 					if loadedErr == nil {
 						archivedJobs = loadedJobs
@@ -377,14 +412,12 @@ func dashboardLoop(
 			}
 		}
 		boardJobs, visibleLoadErr := loadJobs(archiveOpen)
-		visibleJobs := boardJobs
-		if jobsView.open && !jobsShowAll {
-			visibleJobs = filterJobsForWorkspace(boardJobs, dashboardWorkspace)
-		}
+		visibleEntries := entriesSnapshot(archiveOpen, jobsShowAll, openFolder)
 		width := readWidth()
 		height := dashboardHeight(input)
 		inputLock.Lock()
-		wantMouse := modelView != nil || jobsView.open && jobDetailsView == nil && autonomousView == nil
+		wantMouse := modelView != nil || harnessView != nil ||
+			jobDetailsView == nil && autonomousView == nil
 		if wantMouse != mouseEnabled {
 			if wantMouse {
 				fmt.Fprint(output, jobsListMouseEnable)
@@ -397,6 +430,12 @@ func dashboardLoop(
 			screen := modelView.screen(width, height, color)
 			inputLock.Unlock()
 			fmt.Fprint(output, "\x1b[H", listTerminalFrame(screen.Frame))
+			return
+		}
+		if harnessView != nil {
+			frame := harnessView.screen(width, height, color)
+			inputLock.Unlock()
+			fmt.Fprint(output, "\x1b[H", listTerminalFrame(frame))
 			return
 		}
 		if autonomousView != nil {
@@ -446,34 +485,29 @@ func dashboardLoop(
 		}
 		if jobsView.open {
 			bodyHeight := max(3, height-5)
-			if len(visibleJobs) == 0 {
+			if len(visibleEntries) == 0 {
 				jobsView.selected, jobsView.scroll = 0, 0
 			} else {
-				jobsView.selected = min(max(0, jobsView.selected), len(visibleJobs)-1)
+				jobsView.selected = min(max(0, jobsView.selected), len(visibleEntries)-1)
 				if jobsView.selected < jobsView.scroll {
 					jobsView.scroll = jobsView.selected
 				} else if jobsView.selected >= jobsView.scroll+bodyHeight {
 					jobsView.scroll = jobsView.selected - bodyHeight + 1
 				}
 				jobsView.scroll = min(
-					max(0, jobsView.scroll), max(0, len(visibleJobs)-bodyHeight),
+					max(0, jobsView.scroll), max(0, len(visibleEntries)-bodyHeight),
 				)
 			}
-			footer := ""
-			if jobsView.confirmArchive && len(visibleJobs) > 0 {
+			footer := jobsListEntriesFooter(
+				visibleEntries, jobsView.selected, "Esc back", !jobsView.archived, openFolder,
+			)
+			if jobsView.confirmArchive && len(visibleEntries) > 0 {
 				footer = fmt.Sprintf(
 					"Archive %s? y confirm · n cancel",
-					jobViewText(visibleJobs[jobsView.selected].ID),
+					jobViewText(visibleEntries[jobsView.selected].job.ID),
 				)
 			} else if jobsView.notice != "" {
-				mode := jobsListMode{allowActions: !jobsView.archived}
-				footer = jobsView.notice + " · " + jobsListModeFooter(
-					mode, visibleJobs, jobsView.selected, "Esc back",
-				)
-			}
-			mode := jobsListMode{allowActions: !jobsView.archived}
-			if footer == "" {
-				footer = jobsListModeFooter(mode, visibleJobs, jobsView.selected, "Esc back")
+				footer = jobsView.notice + " · " + footer
 			}
 			title := "Pearl"
 			if jobsView.archived {
@@ -482,13 +516,14 @@ func dashboardLoop(
 			if jobsShowAll {
 				title += " · all workspaces"
 			}
-			renderList := renderJobsListScreenWithTitleAndFooter
-			if jobsShowAll {
-				renderList = renderJobsListScreenShowingWorkspace
+			empty := ""
+			if openFolder != "" {
+				title += " · " + openFolder
+				empty = "No jobs in this folder yet. Press n to create one."
 			}
-			screen := renderList(
-				visibleJobs, width, height, jobsView.selected, jobsView.scroll,
-				color, "Esc back", footer, title,
+			screen := renderJobsListEntriesScreen(
+				visibleEntries, width, height, jobsView.selected, jobsView.scroll, color,
+				jobsListView{title: title, footer: footer, empty: empty, showWorkspace: jobsShowAll},
 			)
 			jobsView.bodyHeight = screen.BodyHeight
 			inputLock.Unlock()
@@ -501,13 +536,13 @@ func dashboardLoop(
 		visibleCommandView := commandView
 		visibleCommandView.recalling = history.browsing
 		visibleCommandView.model = displayCurrentModel(currentModel)
+		visibleCommandView.harness = currentHarness
 		inputLock.Unlock()
-		fmt.Fprint(output, "\x1b[H\x1b[2J")
 		frame := renderDashboardState(
-			visibleJobs, time.Now(), width, color, visibleLoadErr, visibleCommand, visibleNotice,
+			boardJobs, time.Now(), width, color, visibleLoadErr, visibleCommand, visibleNotice,
 			visibleSuggestion, visibleCommandView,
 		)
-		fmt.Fprint(output, dashboardTerminalFrame(frame))
+		fmt.Fprint(output, "\x1b[H", listTerminalFrame(dashboardFitHeight(frame, height)))
 	}
 	finishDashboardConfigure := func(apiKey, model string) {
 		inputLock.Lock()
@@ -591,8 +626,10 @@ func dashboardLoop(
 			inputLock.Lock()
 			snapshotArchived := jobsView.open && jobsView.archived
 			snapshotShowAll := jobsView.showAll
+			snapshotFolder := jobsView.folder
 			inputLock.Unlock()
-			suggestionJobs, _ := jobSnapshot(snapshotArchived, snapshotShowAll)
+			suggestionJobs, _ := loadJobs(false)
+			listEntries := entriesSnapshot(snapshotArchived, snapshotShowAll, snapshotFolder)
 			inputLock.Lock()
 			switch {
 			case modelView != nil:
@@ -600,11 +637,16 @@ func dashboardLoop(
 					inputLock.Unlock()
 					continue
 				}
+			case harnessView != nil:
+				if !harnessView.applyAction(action) {
+					inputLock.Unlock()
+					continue
+				}
 			case autonomousView != nil:
 			case jobDetailsView != nil:
 				dashboardApplyJobDetailsAction(jobDetailsView, action)
 			case jobsView.open:
-				if !dashboardApplyJobsViewAction(&jobsView, action, len(suggestionJobs)) {
+				if !dashboardApplyJobsViewAction(&jobsView, action, len(listEntries)) {
 					inputLock.Unlock()
 					continue
 				}
@@ -640,8 +682,10 @@ func dashboardLoop(
 		inputLock.Lock()
 		snapshotArchived := jobsView.open && jobsView.archived
 		snapshotShowAll := jobsView.showAll
+		snapshotFolder := jobsView.folder
 		inputLock.Unlock()
-		navigationJobs, _ := jobSnapshot(snapshotArchived, snapshotShowAll)
+		suggestionJobs, _ := loadJobs(false)
+		navigationEntries := entriesSnapshot(snapshotArchived, snapshotShowAll, snapshotFolder)
 		inputLock.Lock()
 		if modelView != nil {
 			chosen, done := modelView.handleKey(character)
@@ -659,6 +703,26 @@ func dashboardLoop(
 					modelView = nil
 					currentModel = chosen
 					notice = "Model: " + chosen
+				}
+				inputLock.Unlock()
+			}
+			draw(false)
+			continue
+		}
+		if harnessView != nil {
+			chosen, done := harnessView.handleKey(character)
+			if done && (chosen == "" || chosen == currentHarness) {
+				harnessView = nil
+			}
+			inputLock.Unlock()
+			if chosen != "" && chosen != currentHarness {
+				saved, saveErr := saveDefaultHarness(chosen)
+				inputLock.Lock()
+				if saveErr != nil {
+					harnessView.notice = "Harness: " + dashboardText(saveErr.Error())
+				} else {
+					harnessView = nil
+					currentHarness = saved
 				}
 				inputLock.Unlock()
 			}
@@ -721,10 +785,13 @@ func dashboardLoop(
 				archiveJobID := ""
 				switch character {
 				case '\r', '\n', 'y', 'Y':
-					if len(navigationJobs) > 0 {
-						jobsView.selected = min(max(0, jobsView.selected), len(navigationJobs)-1)
-						archiveJobID = navigationJobs[jobsView.selected].ID
+					if len(navigationEntries) > 0 {
+						jobsView.selected = min(max(0, jobsView.selected), len(navigationEntries)-1)
+						if entry := navigationEntries[jobsView.selected]; !entry.isFolder() {
+							archiveJobID = entry.job.ID
+						}
 					}
+					jobsView.confirmArchive = false
 				case 3, 4, 'n', 'N', escapeKey:
 					jobsView.confirmArchive = false
 					jobsView.notice = ""
@@ -750,44 +817,121 @@ func dashboardLoop(
 			}
 			openJobID := ""
 			refreshAfterToggle := false
+			editFolder := ""
+			var selectedEntry *jobsListEntry
+			if len(navigationEntries) > 0 {
+				jobsView.selected = min(max(0, jobsView.selected), len(navigationEntries)-1)
+				selectedEntry = &navigationEntries[jobsView.selected]
+			}
+			preload := func(command string) {
+				commandText, selectedSuggestion, notice = command, 0, ""
+				jobsView.open, jobsView.folder = false, ""
+			}
 			switch character {
-			case 3, 4, escapeKey:
-				jobsView.open = false
+			case escapeKey:
+				if jobsView.folder == "" {
+					jobsView.open = false
+					break
+				}
+				closed := jobsView.folder
+				jobsView.folder, jobsView.notice = "", ""
+				jobsView.selected, jobsView.scroll = 0, 0
+				for index, entry := range entriesSnapshot(snapshotArchived, snapshotShowAll, "") {
+					if entry.isFolder() && entry.folder.Name == closed {
+						jobsView.selected = index
+					}
+				}
+			case 3, 4:
+				jobsView.open, jobsView.folder = false, ""
 			case 'a', 'A':
 				jobsView.showAll = !jobsView.showAll
 				jobsView.selected, jobsView.scroll = 0, 0
 				jobsView.notice = ""
 				refreshAfterToggle = true
 			case 'd', 'D':
-				if !jobsView.archived && len(navigationJobs) > 0 {
+				if !jobsView.archived && selectedEntry != nil && !selectedEntry.isFolder() {
 					jobsView.confirmArchive = true
 					jobsView.notice = ""
 				}
 			case ' ':
-				if !jobsView.archived && len(navigationJobs) > 0 {
-					jobsView.selected = min(max(0, jobsView.selected), len(navigationJobs)-1)
-					if command := jobsListPreloadCommand(navigationJobs[jobsView.selected]); command != "" {
-						commandText = command
-						selectedSuggestion = 0
-						notice = ""
-						jobsView.open = false
-					}
+				if jobsView.archived || selectedEntry == nil {
+					break
+				}
+				if selectedEntry.isFolder() {
+					preload(jobsListFolderJobCommand(selectedEntry.folder.Name))
+				} else if command := jobsListPreloadCommand(selectedEntry.job); command != "" {
+					preload(command)
+				}
+			case 'n':
+				if !jobsView.archived && jobsView.folder != "" {
+					preload(jobsListFolderJobCommand(jobsView.folder))
+				}
+			case 'f':
+				if !jobsView.archived && jobsView.folder == "" {
+					preload("folder create ")
+				}
+			case 'e', 'E':
+				if jobsView.archived {
+					break
+				}
+				editFolder = jobsView.folder
+				if editFolder == "" && selectedEntry != nil && selectedEntry.isFolder() {
+					editFolder = selectedEntry.folder.Name
+				}
+				if editFolder == "" {
+					jobsView.notice = "Select a folder to change its directory"
+				} else {
+					jobsView.notice = "Choose a new directory for " + editFolder + " in the picker"
 				}
 			case '\r', '\n':
-				if len(navigationJobs) > 0 {
-					jobsView.selected = min(max(0, jobsView.selected), len(navigationJobs)-1)
-					openJobID = navigationJobs[jobsView.selected].ID
+				if selectedEntry == nil {
+					break
+				}
+				if selectedEntry.isFolder() {
+					jobsView.folder = selectedEntry.folder.Name
+					jobsView.selected, jobsView.scroll, jobsView.notice = 0, 0, ""
+				} else {
+					openJobID = selectedEntry.job.ID
 				}
 			case '\t', 'j':
-				dashboardApplyJobsViewAction(&jobsView, "next", len(navigationJobs))
+				dashboardApplyJobsViewAction(&jobsView, "next", len(navigationEntries))
 			case 'k':
-				dashboardApplyJobsViewAction(&jobsView, "previous", len(navigationJobs))
+				dashboardApplyJobsViewAction(&jobsView, "previous", len(navigationEntries))
 			case 'g':
-				dashboardApplyJobsViewAction(&jobsView, "home", len(navigationJobs))
+				dashboardApplyJobsViewAction(&jobsView, "home", len(navigationEntries))
 			case 'G':
-				dashboardApplyJobsViewAction(&jobsView, "end", len(navigationJobs))
+				dashboardApplyJobsViewAction(&jobsView, "end", len(navigationEntries))
 			}
 			inputLock.Unlock()
+			if editFolder != "" {
+				folder, found := findFolder(editFolder)
+				draw(false)
+				var moveErr error
+				if !found {
+					moveErr = fmt.Errorf("folder %q not found", editFolder)
+				}
+				directory := ""
+				if moveErr == nil {
+					directory, moveErr = chooseFolderDirectory(folder.WorkspaceRoot)
+				}
+				if moveErr == nil {
+					requestContext, cancel := context.WithTimeout(sessionContext, 5*time.Second)
+					folder, moveErr = client.setFolderWorkspace(requestContext, folder.Name, directory)
+					cancel()
+				}
+				inputLock.Lock()
+				switch {
+				case errors.Is(moveErr, errDirectoryPickerCancelled):
+					jobsView.notice = "Directory unchanged"
+				case moveErr != nil:
+					jobsView.notice = "Folder failed: " + dashboardText(moveErr.Error())
+				default:
+					jobsView.notice = "Moved " + folder.Name + " to " +
+						displayJobDirectory(folder.WorkspaceRoot)
+				}
+				inputLock.Unlock()
+				refreshAfterToggle = true
+			}
 			if openJobID != "" {
 				requestContext, cancel := context.WithTimeout(sessionContext, 5*time.Second)
 				details, detailsErr := client.jobDetails(requestContext, openJobID)
@@ -863,7 +1007,7 @@ func dashboardLoop(
 			selectedSuggestion = 0
 		case '\t':
 			commandText = dashboardFillSuggestionForStepWithJobs(
-				commandText, commandView.configureStep, selectedSuggestion, navigationJobs,
+				commandText, commandView.configureStep, selectedSuggestion, suggestionJobs,
 			)
 			selectedSuggestion = 0
 		case 21:
@@ -952,6 +1096,14 @@ func dashboardLoop(
 				continue
 			}
 			if len(parsed) == 0 {
+				inputLock.Unlock()
+				draw(false)
+				continue
+			}
+			if len(parsed) == 1 && parsed[0] == "harness" {
+				harnessView = newHarnessPicker(currentHarness, availableHarnesses())
+				commandView = dashboardCommandView{}
+				commandText, selectedSuggestion = "", 0
 				inputLock.Unlock()
 				draw(false)
 				continue
@@ -1161,6 +1313,10 @@ func dashboardLoop(
 					inputLock.Lock()
 					commandView.running = false
 					commandView.exitCode = exitCode
+					if exitCode == 0 && arguments[0] == "harness" {
+						// The harness line under the composer already shows the result.
+						commandView = dashboardCommandView{}
+					}
 					commandCancel = nil
 					inputLock.Unlock()
 					if sessionContext.Err() == nil {
@@ -1180,6 +1336,61 @@ func dashboardLoop(
 		inputLock.Unlock()
 		draw(false)
 	}
+}
+
+var dashboardArt = []string{
+	`    __________`,
+	"  ,'_/_/\\/\\_\\_`.",
+	"  `.  \\    /  ,'",
+	"    `. \\  / ,'",
+	"      `.\\/,'",
+}
+
+const (
+	dashboardArtColumn   = 20
+	dashboardArtMinWidth = 54
+	dashboardTagline     = "agents at work in the background"
+)
+
+// writeDashboardArtHeader draws the diamond with the title beside it and the
+// clock on the right of the first row.
+func writeDashboardArtHeader(frame *bytes.Buffer, width int, color bool, clock string) {
+	for row, art := range dashboardArt {
+		line := dashboardPaint(color, ansiCyan, art)
+		used := len(art)
+		text, style := "", ""
+		switch row {
+		case 0:
+			text, style = clock, ansiDim
+		case 2:
+			text, style = dashboardTitle, ansiBold+ansiCyan
+		case 3:
+			text, style = dashboardTagline, ansiDim
+		}
+		if text == "" {
+			fmt.Fprintln(frame, line)
+			continue
+		}
+		column := dashboardArtColumn
+		if row == 0 {
+			column = width - len(clock)
+		}
+		text = dashboardTruncate(text, width-column)
+		fmt.Fprintln(frame, line+strings.Repeat(" ", column-used)+dashboardPaint(color, style, text))
+	}
+}
+
+// chooseFolderDirectory opens the directory picker for a folder.
+var chooseFolderDirectory = chooseJobDirectory
+
+// dashboardFitHeight keeps the bottom rows of frame so it never pushes lines
+// into the terminal's scrollback.
+func dashboardFitHeight(frame string, height int) string {
+	lines := strings.Split(strings.TrimSuffix(frame, "\n"), "\n")
+	if height > 0 && len(lines) > height {
+		lines = lines[len(lines)-height:]
+	}
+	return strings.Join(lines, "\n")
 }
 
 func dashboardTerminalFrame(frame string) string {
@@ -1374,6 +1585,9 @@ func dashboardCommandSuggestionsInternal(
 	if useJobIDs && command == "jobs" {
 		return dashboardJobsCommandSuggestions(remainder, trailingSpace, jobs)
 	}
+	if useJobIDs && command == "respond" {
+		return dashboardRespondCommandSuggestions(remainder, trailingSpace, jobs)
+	}
 	remainder = strings.ToLower(remainder)
 	return dashboardCommandItemSuggestions(command, remainder)
 }
@@ -1472,6 +1686,64 @@ func dashboardRunCommandSuggestions(
 		})
 	}
 	return suggestions
+}
+
+// dashboardRespondCommandSuggestions lists paused jobs while the job ID is
+// typed, then shows the job's question while the answer is typed.
+func dashboardRespondCommandSuggestions(
+	remainder string,
+	trailingSpace bool,
+	jobs []store.Job,
+) []dashboardCommandSuggestion {
+	var paused []store.Job
+	for _, job := range jobs {
+		if job.Status == store.JobWaitingInput {
+			paused = append(paused, job)
+		}
+	}
+	for _, job := range paused {
+		id := dashboardEscapeCommandArgument(job.ID)
+		if remainder == id && trailingSpace || strings.HasPrefix(remainder, id+" ") {
+			return []dashboardCommandSuggestion{{
+				usage:       "\"<answer>\"",
+				completion:  "respond " + id + " ",
+				description: dashboardRespondQuestion(job),
+			}}
+		}
+	}
+	if trailingSpace && remainder != "" {
+		return nil
+	}
+	query := strings.ToLower(strings.Trim(remainder, "\"'"))
+	suggestions := make([]dashboardCommandSuggestion, 0, len(paused))
+	for _, job := range paused {
+		id := dashboardEscapeCommandArgument(job.ID)
+		if !strings.HasPrefix(strings.ToLower(id), query) &&
+			!strings.HasPrefix(strings.ToLower(job.ID), query) {
+			continue
+		}
+		suggestions = append(suggestions, dashboardCommandSuggestion{
+			usage:       job.ID,
+			completion:  "respond " + id + " ",
+			description: dashboardRespondQuestion(job),
+		})
+	}
+	if len(suggestions) == 0 && query == "" {
+		return []dashboardCommandSuggestion{{
+			usage:       "<job-id> \"<answer>\"",
+			completion:  "respond ",
+			description: "No jobs are waiting for an answer",
+		}}
+	}
+	return suggestions
+}
+
+func dashboardRespondQuestion(job store.Job) string {
+	question := dashboardText(job.Question)
+	if question == "" {
+		return "Waiting for an answer"
+	}
+	return "Asks: " + question
 }
 
 func dashboardRunSuggestionDescription(job store.Job) string {
@@ -1819,7 +2091,9 @@ func renderDashboardState(
 	var frame bytes.Buffer
 	title := dashboardPaint(color, ansiBold+ansiCyan, dashboardTitle)
 	clock := now.Local().Format("15:04:05")
-	if width >= len(dashboardTitle)+len(clock)+1 {
+	if width >= dashboardArtMinWidth {
+		writeDashboardArtHeader(&frame, width, color, clock)
+	} else if width >= len(dashboardTitle)+len(clock)+1 {
 		fmt.Fprintf(&frame, "%s%s%s\n", title,
 			strings.Repeat(" ", width-len(dashboardTitle)-len(clock)),
 			dashboardPaint(color, ansiDim, clock))
@@ -1893,7 +2167,7 @@ func renderDashboardState(
 	fmt.Fprintln(&frame)
 	fmt.Fprint(&frame, renderDashboardComposer(
 		jobs, commandText, notice, width, color, selectedSuggestion, commandView.running,
-		commandView.configureStep, commandView.recalling, commandView.model,
+		commandView.configureStep, commandView.recalling, commandView.model, commandView.harness,
 		running, queued, waiting, loadErr == nil,
 	))
 	return frame.String()
@@ -2104,7 +2378,7 @@ func renderDashboardComposer(
 	commandRunning bool,
 	configureStep dashboardConfigureStep,
 	recalling bool,
-	model string,
+	model, harness string,
 	running, queued, waiting int,
 	daemonActive bool,
 ) string {
@@ -2200,8 +2474,15 @@ func renderDashboardComposer(
 		}
 		fmt.Fprintln(&composer, dashboardPaint(color, ansiDim, "╰"+border+"╯"))
 	}
-	if model != "" {
-		fmt.Fprintln(&composer, dashboardTruncate("  Current model: "+model, width))
+	if model != "" || harness != "" {
+		var details []string
+		if model != "" {
+			details = append(details, "Current model: "+model)
+		}
+		if harness != "" {
+			details = append(details, "Harness: "+harness)
+		}
+		fmt.Fprintln(&composer, dashboardTruncate("  "+strings.Join(details, " · "), width))
 	}
 
 	leftHint := ""

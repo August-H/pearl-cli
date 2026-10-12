@@ -28,6 +28,15 @@ const (
 	codexStderrTailBytes    = 4 << 10
 	codexContinuePrompt     = "Continue working on the original task. If it is already complete, check the result and summarize it."
 	codexModelMetadataError = "Model metadata for"
+	codexInputUsedEvent     = "codex_input_used"
+	codexQuestionIDPrefix   = "codex-question-"
+	codexQuestionMarker     = "PEARL_QUESTION:"
+	codexInstructions       = "You are running as an unattended background job for Pearl. Nobody can reply to you during this turn. " +
+		"When you need a decision, missing information, or clarification from the user before you can finish, end your turn with a final message whose first line starts with exactly " +
+		codexQuestionMarker + " followed by your question. Pearl pauses the job, shows the question to the user, and sends you their answer. " +
+		"Never ask the user a question any other way, and never use " + codexQuestionMarker + " when you are not asking."
+	codexQuestionReminder = "\n\n(Pearl: if you need to ask me anything, start your final message with " +
+		codexQuestionMarker + " and I will answer.)"
 )
 
 // CodexRunner runs jobs with the Codex CLI, sending model requests to
@@ -98,22 +107,30 @@ func (r CodexRunner) Run(
 	ctx, cancel := context.WithTimeout(ctx, maxDuration)
 	defer cancel()
 
-	threadID := ""
-	if threads, ok := state.(codexThreadStore); ok {
-		previous, err := threads.EventsOfType(ctx, job.ID, codexThreadEvent)
-		if err != nil {
-			return "", fmt.Errorf("load Codex session: %w", err)
-		}
-		if len(previous) > 0 {
-			threadID = previous[len(previous)-1].Data
-		}
+	threadID, answer, err := codexResumeState(ctx, job, state)
+	if err != nil {
+		return "", err
 	}
 	prompt := job.Prompt
 	var transcript []codexTranscriptMessage
 	if threadID != "" {
-		prompt = codexContinuePrompt
 		if saved, err := state.LoadTranscript(ctx, job.ID); err == nil && len(saved) > 0 {
 			_ = json.Unmarshal(saved, &transcript)
+		}
+	}
+	switch {
+	case answer != "" && threadID != "":
+		prompt = answer
+	case answer != "":
+		prompt = job.Prompt + "\n\nYour earlier question was answered: " + answer
+	case threadID != "":
+		prompt = codexContinuePrompt
+	}
+	if answer != "" && events != nil {
+		if err := events(openrouter_request.AgentEvent{
+			Type: codexInputUsedEvent, Data: job.InputToolCallID,
+		}); err != nil {
+			return "", fmt.Errorf("record answer: %w", err)
 		}
 	}
 	transcript = append(transcript, codexTranscriptMessage{Role: "user", Content: prompt})
@@ -123,7 +140,7 @@ func (r CodexRunner) Run(
 	)...)
 	command.Dir = job.WorkspaceRoot
 	command.Env = append(os.Environ(), codexAPIKeyEnvironment+"="+apiKey)
-	command.Stdin = strings.NewReader(prompt)
+	command.Stdin = strings.NewReader(prompt + codexQuestionReminder)
 	command.Cancel = func() error { return command.Process.Signal(os.Interrupt) }
 	command.WaitDelay = 5 * time.Second
 	var stderr codexTailBuffer
@@ -170,8 +187,68 @@ func (r CodexRunner) Run(
 		return "", fmt.Errorf("Codex failed: %s", message)
 	case !parser.completed:
 		return "", errors.New("Codex exited before finishing the task")
+	case parser.question != "":
+		return "", &openrouter_request.UserInputRequiredError{
+			ToolCallID: fmt.Sprintf("%s%d", codexQuestionIDPrefix, time.Now().UnixNano()),
+			Question:   parser.question,
+		}
 	}
 	return parser.lastAnswer, nil
+}
+
+// codexResumeState returns the Codex session to resume, if any, and the user's
+// answer to a question Codex asked that has not been sent to Codex yet.
+func codexResumeState(
+	ctx context.Context,
+	job store.Job,
+	state openrouter_request.CheckpointStore,
+) (threadID, answer string, err error) {
+	threads, ok := state.(codexThreadStore)
+	if !ok {
+		return "", "", nil
+	}
+	previous, err := threads.EventsOfType(ctx, job.ID, codexThreadEvent)
+	if err != nil {
+		return "", "", fmt.Errorf("load Codex session: %w", err)
+	}
+	if len(previous) > 0 {
+		threadID = previous[len(previous)-1].Data
+	}
+	if !strings.HasPrefix(job.InputToolCallID, codexQuestionIDPrefix) {
+		return threadID, "", nil
+	}
+	response, found, err := state.LoadUserInputResponse(ctx, job.ID, job.InputToolCallID)
+	if err != nil || !found {
+		return threadID, "", err
+	}
+	used, err := threads.EventsOfType(ctx, job.ID, codexInputUsedEvent)
+	if err != nil {
+		return "", "", fmt.Errorf("load answered questions: %w", err)
+	}
+	for _, event := range used {
+		if event.Data == job.InputToolCallID {
+			return threadID, "", nil
+		}
+	}
+	return threadID, response, nil
+}
+
+// codexQuestion returns the question in a message that asks the user one, or "".
+// Models often wrap the marker line in Markdown, as in **PEARL_QUESTION: ...**.
+func codexQuestion(message string) string {
+	const markdown = "*_#>` \t"
+	lines := strings.Split(message, "\n")
+	for index, line := range lines {
+		trimmed := strings.TrimLeft(strings.TrimSpace(line), markdown)
+		if !strings.HasPrefix(trimmed, codexQuestionMarker) {
+			continue
+		}
+		first := strings.TrimPrefix(trimmed, codexQuestionMarker)
+		first = strings.TrimRight(strings.TrimLeft(first, markdown), markdown)
+		rest := append([]string{first}, lines[index+1:]...)
+		return strings.TrimSpace(strings.Join(rest, "\n"))
+	}
+	return ""
 }
 
 func codexArguments(model string, contextWindow int64, threadID string) []string {
@@ -188,6 +265,7 @@ func codexArguments(model string, contextWindow int64, threadID string) []string
 		"-c", `model_providers.openrouter.wire_api="responses"`,
 		"-c", `sandbox_mode="workspace-write"`,
 		"-c", `approval_policy="never"`,
+		"-c", "developer_instructions="+strconv.Quote(codexInstructions),
 	)
 	if contextWindow > 0 {
 		arguments = append(arguments, "-c", "model_context_window="+strconv.FormatInt(contextWindow, 10))
@@ -269,6 +347,7 @@ type codexEventParser struct {
 	reasoning     string
 	lastEmitted   string
 	lastAnswer    string
+	question      string
 	lastError     string
 	failure       string
 	completed     bool
@@ -335,6 +414,14 @@ func (p *codexEventParser) completeItem(item codexItem) error {
 		if text == "" {
 			return nil
 		}
+		if question := codexQuestion(text); question != "" {
+			p.question = question
+			p.transcript = append(p.transcript, codexTranscriptMessage{
+				Role: "assistant", Content: question, Reasoning: p.takeReasoning(),
+			})
+			return nil
+		}
+		p.question = ""
 		p.lastAnswer = text
 		p.transcript = append(p.transcript, codexTranscriptMessage{
 			Role: "assistant", Content: text, Reasoning: p.takeReasoning(),
@@ -474,7 +561,7 @@ func (p *codexEventParser) emit(eventType, data string) error {
 	return nil
 }
 
-var codexShellWrapper = regexp.MustCompile(`^\S*/(?:ba|z)?sh -lc (.+)$`)
+var codexShellWrapper = regexp.MustCompile(`(?s)^\S*/(?:ba|z)?sh -lc (.+)$`)
 
 // codexDisplayCommand removes the login-shell wrapper Codex adds to commands.
 func codexDisplayCommand(command string) string {

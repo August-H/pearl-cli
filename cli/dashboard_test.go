@@ -392,19 +392,25 @@ func TestDashboardHistoryRecallsSentCommandsNewestFirst(t *testing.T) {
 func TestRenderDashboardComposerShowsModelBelowInputBox(t *testing.T) {
 	for _, color := range []bool{false, true} {
 		output := renderDashboardComposer(nil, "", "", 80, color, 0, false,
-			dashboardConfigureInactive, false, "anthropic/claude-opus-5.5", 0, 0, 0, true)
+			dashboardConfigureInactive, false, "anthropic/claude-opus-5.5", "", 0, 0, 0, true)
 		lines := strings.Split(strings.TrimRight(output, "\n"), "\n")
 		last := lines[len(lines)-1]
 		if last != "  Current model: anthropic/claude-opus-5.5" || !strings.Contains(lines[len(lines)-2], "╯") {
 			t.Fatalf("color %v: model line is not plain text below the box:\n%q", color, lines)
 		}
 	}
+	output := renderDashboardComposer(nil, "", "", 80, false, 0, false,
+		dashboardConfigureInactive, false, "openrouter/free", "codex", 0, 0, 0, true)
+	lines := strings.Split(strings.TrimRight(output, "\n"), "\n")
+	if last := lines[len(lines)-1]; last != "  Current model: openrouter/free · Harness: codex" {
+		t.Fatalf("model and harness line = %q", last)
+	}
 }
 
 func TestRenderDashboardComposerHidesSuggestionsWhileRecalling(t *testing.T) {
 	render := func(recalling bool) string {
 		return renderDashboardComposer(nil, "respond", "", 80, false, 0, false,
-			dashboardConfigureInactive, recalling, "", 0, 0, 0, true)
+			dashboardConfigureInactive, recalling, "", "", 0, 0, 0, true)
 	}
 	if browsing := render(false); !strings.Contains(browsing, "Answer a paused job") {
 		t.Fatalf("typed command is missing suggestions:\n%s", browsing)
@@ -451,11 +457,12 @@ func TestDashboardCommandSuggestionsFilterNavigateAndFill(t *testing.T) {
 		t.Fatalf("filling a detached run item returned %q", got)
 	}
 	jobItems := dashboardCommandSuggestions("job ")
-	if len(jobItems) != 4 || jobItems[0].usage != "<prompt>" ||
+	if len(jobItems) != 5 || jobItems[0].usage != "<prompt>" ||
 		jobItems[0].description != "Create a job in the current directory" ||
 		jobItems[1].usage != "<prompt> -n <name>" ||
 		jobItems[2].usage != "<prompt> [-n name] --directory" ||
-		jobItems[3].usage != "<prompt> --harness codex" {
+		jobItems[3].usage != "<prompt> --harness codex" ||
+		jobItems[4].usage != "<prompt> --folder <name>" {
 		t.Fatalf("dashboardCommandSuggestions(\"job \") = %#v", jobItems)
 	}
 	if got := dashboardFillSuggestion("job ", 2); got != "job " {
@@ -956,5 +963,68 @@ func TestRenderDashboardComposerShowsPlaceholder(t *testing.T) {
 	}
 	if strings.Contains(output, "├") {
 		t.Fatalf("empty dashboard command unexpectedly shows suggestions:\n%s", output)
+	}
+}
+
+func TestDashboardHeaderDrawsADiamondBesideTheTitle(t *testing.T) {
+	now := time.Date(2026, 10, 11, 18, 30, 0, 0, time.Local)
+	frame := renderDashboardState(nil, now, 60, false, nil, "", "", 0, dashboardCommandView{})
+	t.Log("\n" + frame)
+	lines := strings.Split(frame, "\n")
+	if !strings.HasPrefix(lines[0], dashboardArt[0]) || !strings.HasSuffix(lines[0], "18:30:00") ||
+		len([]rune(lines[0])) != 60 {
+		t.Fatalf("first row = %q, want art with the clock at the right edge", lines[0])
+	}
+	if lines[2] != "  `.  \\    /  ,'    Pearl" || lines[4] != dashboardArt[4] ||
+		!strings.HasPrefix(lines[5], "─") {
+		t.Fatalf("header rows = %q", lines[:6])
+	}
+	narrow := renderDashboardState(nil, now, 30, false, nil, "", "", 0, dashboardCommandView{})
+	if strings.Contains(narrow, `\/`) || !strings.HasPrefix(narrow, "Pearl") {
+		t.Fatalf("narrow header should skip the art:\n%s", narrow)
+	}
+}
+
+func TestDashboardRespondSuggestsPausedJobsAndTheirQuestions(t *testing.T) {
+	jobs := []store.Job{
+		{ID: "quiet-otter", Status: store.JobWaitingInput, Question: "Which port?"},
+		{ID: "quick-fox", Status: store.JobCompleted},
+		{ID: "fix tests", Status: store.JobWaitingInput, Question: "Run all tests?"},
+	}
+	items := dashboardCommandSuggestionsWithJobs("respond ", jobs)
+	if len(items) != 2 || items[0].usage != "quiet-otter" ||
+		items[0].completion != "respond quiet-otter " || items[0].description != "Asks: Which port?" ||
+		items[1].completion != `respond fix\ tests ` {
+		t.Fatalf("respond suggestions = %#v", items)
+	}
+	if got := dashboardFillSuggestionForStepWithJobs(
+		"respond qu", dashboardConfigureInactive, 0, jobs,
+	); got != "respond quiet-otter " {
+		t.Fatalf("Tab filled %q", got)
+	}
+	answer := dashboardCommandSuggestionsWithJobs("respond quiet-otter 80", jobs)
+	if len(answer) != 1 || answer[0].description != "Asks: Which port?" {
+		t.Fatalf("answer suggestions = %#v", answer)
+	}
+	if got := dashboardFillSuggestionForStepWithJobs(
+		"respond quiet-otter 80", dashboardConfigureInactive, 0, jobs,
+	); got != "respond quiet-otter 80" {
+		t.Fatalf("Tab changed the answer to %q", got)
+	}
+	if none := dashboardCommandSuggestionsWithJobs("respond ", jobs[1:2]); len(none) != 1 ||
+		none[0].description != "No jobs are waiting for an answer" {
+		t.Fatalf("no paused jobs = %#v", none)
+	}
+	if missing := dashboardCommandSuggestionsWithJobs("respond zz", jobs); len(missing) != 0 {
+		t.Fatalf("unknown prefix = %#v", missing)
+	}
+}
+
+func TestDashboardFrameNeverOutgrowsTheTerminal(t *testing.T) {
+	if got := dashboardFitHeight("a\nb\nc\nd\n", 2); got != "c\nd" {
+		t.Fatalf("tall frame = %q, want the bottom rows", got)
+	}
+	if got := dashboardFitHeight("a\nb\n", 5); got != "a\nb" {
+		t.Fatalf("short frame = %q", got)
 	}
 }

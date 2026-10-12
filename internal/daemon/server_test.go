@@ -132,6 +132,87 @@ func getTestJob(t *testing.T, client *http.Client, id string) store.Job {
 	return job
 }
 
+func testFolderRequest(
+	t *testing.T,
+	client *http.Client,
+	method, path string,
+	input any,
+	wantStatus int,
+	output any,
+) {
+	t.Helper()
+	var body io.Reader
+	if input != nil {
+		payload, _ := json.Marshal(input)
+		body = bytes.NewReader(payload)
+	}
+	request, err := http.NewRequest(method, "http://pearl"+path, body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response, err := client.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != wantStatus {
+		data, _ := io.ReadAll(response.Body)
+		t.Fatalf("%s %s status=%s body=%s", method, path, response.Status, data)
+	}
+	if output != nil {
+		if err := json.NewDecoder(response.Body).Decode(output); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func TestServerCreatesJobsInFolders(t *testing.T) {
+	runtimeDirectory, err := os.MkdirTemp("/tmp", "pearl-daemon-test-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(runtimeDirectory) })
+	paths := pearlpaths.Paths{
+		Directory: runtimeDirectory,
+		Database:  filepath.Join(runtimeDirectory, "pearl.db"),
+		Socket:    filepath.Join(runtimeDirectory, "pearl.sock"),
+		Log:       filepath.Join(runtimeDirectory, "pearl.log"),
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	result := make(chan error, 1)
+	go func() { result <- Run(ctx, paths, &serialTestRunner{}) }()
+	defer func() {
+		cancel()
+		<-result
+	}()
+	client := unixHTTPClient(paths.Socket)
+	waitForDaemon(t, client)
+
+	first, second := t.TempDir(), t.TempDir()
+	testFolderRequest(t, client, http.MethodPost, "/v1/folders",
+		map[string]string{"name": "docs", "workspace_root": first}, http.StatusCreated, nil)
+	var job store.Job
+	testFolderRequest(t, client, http.MethodPost, "/v1/jobs",
+		map[string]string{"prompt": "write docs", "folder": "docs"}, http.StatusAccepted, &job)
+	if job.Folder != "docs" || job.WorkspaceRoot != first {
+		t.Fatalf("folder job = %+v", job)
+	}
+	var folder store.Folder
+	testFolderRequest(t, client, http.MethodPatch, "/v1/folders/docs",
+		map[string]string{"workspace_root": second}, http.StatusOK, &folder)
+	if folder.WorkspaceRoot != second || getTestJob(t, client, job.ID).WorkspaceRoot != second {
+		t.Fatalf("folder did not move its job: %+v", folder)
+	}
+	var folders []store.Folder
+	testFolderRequest(t, client, http.MethodGet, "/v1/folders", nil, http.StatusOK, &folders)
+	if len(folders) != 1 || folders[0].Name != "docs" {
+		t.Fatalf("folders = %+v", folders)
+	}
+	testFolderRequest(t, client, http.MethodPost, "/v1/jobs",
+		map[string]string{"prompt": "x", "folder": "missing"}, http.StatusBadRequest, nil)
+	testFolderRequest(t, client, http.MethodDelete, "/v1/folders/docs", nil, http.StatusNoContent, nil)
+}
+
 func TestServerProcessesQueuedJobsWithOneAgent(t *testing.T) {
 	runtimeDirectory, err := os.MkdirTemp("/tmp", "pearl-daemon-test-")
 	if err != nil {

@@ -355,12 +355,12 @@ func renameJobID(ctx context.Context, transaction *sql.Tx, oldID, newID string) 
 INSERT INTO jobs (
     id, name, prompt, workspace_root, status, result, error, cancel_requested,
     transcript, agent_context, input_question, input_tool_call_id, input_response,
-    created_at, started_at, finished_at, harness
+    created_at, started_at, finished_at, harness, folder
 )
 SELECT
     ?, '', prompt, workspace_root, status, result, error, cancel_requested,
     transcript, agent_context, input_question, input_tool_call_id, input_response,
-    created_at, started_at, finished_at, harness
+    created_at, started_at, finished_at, harness, folder
 FROM jobs WHERE id = ?`, newID, oldID); err != nil {
 		return fmt.Errorf("copy job %q: %w", oldID, err)
 	}

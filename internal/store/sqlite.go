@@ -117,6 +117,12 @@ CREATE TABLE IF NOT EXISTS autonomous_jobs (
 );
 CREATE INDEX IF NOT EXISTS autonomous_jobs_session
 ON autonomous_jobs(session_id, created_at);
+
+CREATE TABLE IF NOT EXISTS folders (
+    name TEXT PRIMARY KEY,
+    workspace_root TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
 `
 	if _, err := s.db.ExecContext(ctx, schema); err != nil {
 		return err
@@ -132,6 +138,7 @@ ON autonomous_jobs(session_id, created_at);
 		{name: "input_response", definition: "TEXT NOT NULL DEFAULT ''"},
 		{name: "archived_at", definition: "TEXT"},
 		{name: "harness", definition: "TEXT NOT NULL DEFAULT ''"},
+		{name: "folder", definition: "TEXT NOT NULL DEFAULT ''"},
 	} {
 		if err := s.ensureColumn(ctx, "jobs", column.name, column.definition); err != nil {
 			return err
@@ -219,6 +226,7 @@ func scanJob(scanner interface{ Scan(...any) error }) (Job, error) {
 		&job.ID, &job.Prompt, &job.WorkspaceRoot, &job.Status, &job.Result,
 		&job.Error, &cancelRequested, &job.Question, &job.InputToolCallID,
 		&job.InputResponse, &created, &started, &finished, &archived, &job.Harness,
+		&job.Folder,
 	)
 	if err != nil {
 		return Job{}, err
@@ -242,6 +250,6 @@ func scanJob(scanner interface{ Scan(...any) error }) (Job, error) {
 
 const jobColumns = `id, prompt, workspace_root, status, result, error,
 cancel_requested, input_question, input_tool_call_id, input_response,
-created_at, started_at, finished_at, archived_at, harness`
+created_at, started_at, finished_at, archived_at, harness, folder`
 
 func isNotFound(err error) bool { return errors.Is(err, sql.ErrNoRows) }
