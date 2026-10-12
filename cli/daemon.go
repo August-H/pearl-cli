@@ -40,7 +40,8 @@ func runDaemonCommand(args []string) int {
 		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 		defer stop()
 		fmt.Println("Pearl daemon listening at", paths.Socket)
-		if err := daemon.Run(ctx, paths, daemon.OpenRouterRunner{}); err != nil {
+		runner := daemon.HarnessRunner{Pearl: daemon.OpenRouterRunner{}, Codex: daemon.CodexRunner{}}
+		if err := daemon.Run(ctx, paths, runner); err != nil {
 			return printError("Daemon", err)
 		}
 		return 0

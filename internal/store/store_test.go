@@ -47,6 +47,57 @@ func TestCreateJobUsesUniqueTwoWordIDs(t *testing.T) {
 	}
 }
 
+func TestJobsRememberTheirHarness(t *testing.T) {
+	state := openTestStore(t)
+	ctx := context.Background()
+	job, err := state.CreatePendingJob(ctx, "", "use codex", t.TempDir(), " Codex ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored, err := state.GetJob(ctx, job.ID); err != nil || stored.Harness != HarnessCodex {
+		t.Fatalf("stored harness = %q, %v", stored.Harness, err)
+	}
+	if err := state.SetJobHarness(ctx, job.ID, HarnessPearl); err != nil {
+		t.Fatal(err)
+	}
+	if stored, err := state.GetJob(ctx, job.ID); err != nil || stored.Harness != HarnessPearl {
+		t.Fatalf("updated harness = %q, %v", stored.Harness, err)
+	}
+	if _, err := state.CreatePendingJob(ctx, "", "bad", t.TempDir(), "claude"); err == nil {
+		t.Fatal("an unknown harness was accepted")
+	}
+	if defaultJob, err := state.CreateJob(ctx, "default", t.TempDir()); err != nil || defaultJob.Harness != "" {
+		t.Fatalf("default job harness = %q, %v", defaultJob.Harness, err)
+	}
+}
+
+func TestJobIDWordListsAreLargeUniqueAndShort(t *testing.T) {
+	for name, words := range map[string][]string{
+		"adjectives": jobIDAdjectives,
+		"nouns":      jobIDNouns,
+	} {
+		if len(words) < 500 {
+			t.Errorf("%s has %d words, want at least 500", name, len(words))
+		}
+		seen := make(map[string]bool, len(words))
+		for _, word := range words {
+			if seen[word] {
+				t.Errorf("%s repeats %q", name, word)
+			}
+			seen[word] = true
+			if word == "" || len(word) > jobIDMaxWordLength {
+				t.Errorf("%s word %q must be 1 to %d letters", name, word, jobIDMaxWordLength)
+			}
+			for _, character := range word {
+				if character < 'a' || character > 'z' {
+					t.Errorf("%s word %q must be lowercase letters only", name, word)
+					break
+				}
+			}
+		}
+	}
+}
+
 func TestCreateNamedJobUsesNameAsID(t *testing.T) {
 	state := openTestStore(t)
 	job, err := state.CreateNamedJob(

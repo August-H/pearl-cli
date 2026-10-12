@@ -28,6 +28,7 @@ type jobDetails struct {
 	Transcript     []byte                `json:"transcript,omitempty"`
 	ToolExecutions []store.ToolExecution `json:"tool_executions"`
 	StatusEvents   []store.Event         `json:"status_events"`
+	Models         []string              `json:"models"`
 }
 
 func newDaemonClient() (*daemonClient, error) {
@@ -92,10 +93,20 @@ func (c *daemonClient) submitNamed(
 	ctx context.Context,
 	name, prompt, workspace string,
 ) (store.Job, error) {
+	return c.submitJob(ctx, name, prompt, workspace, "")
+}
+
+func (c *daemonClient) submitJob(
+	ctx context.Context,
+	name, prompt, workspace, harness string,
+) (store.Job, error) {
 	var job store.Job
 	input := map[string]string{"prompt": prompt, "workspace_root": workspace}
 	if name = strings.TrimSpace(name); name != "" {
 		input["name"] = name
+	}
+	if harness = strings.TrimSpace(harness); harness != "" {
+		input["harness"] = harness
 	}
 	err := c.request(ctx, http.MethodPost, "/v1/jobs", input, &job)
 	return job, err

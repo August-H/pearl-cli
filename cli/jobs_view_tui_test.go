@@ -56,9 +56,41 @@ func TestJobViewUsesExpandableSectionsWithoutDroppingTranscript(t *testing.T) {
 	screen := renderJobViewScreen(
 		details.Job, sections, 60, 12, transcriptIndex, headers[transcriptIndex], false,
 	)
-	for _, expected := range []string{"Pearl job: swift-delta", "Transcript", "q exit"} {
+	for _, expected := range []string{"Pearl job: swift-delta", "Transcript", "Esc exit"} {
 		if !strings.Contains(screen.Frame, expected) {
 			t.Fatalf("job view screen is missing %q:\n%s", expected, screen.Frame)
+		}
+	}
+}
+
+func TestJobViewShowsFreeTierModelsUnderTranscript(t *testing.T) {
+	details := jobDetails{
+		Job:        store.Job{ID: "free-job", Status: store.JobCompleted, Prompt: "hi"},
+		Transcript: []byte(`[{"role":"user","content":"hi"}]`),
+	}
+	sections, err := buildJobViewSections(details)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sections[len(sections)-1].Title != "Transcript" {
+		t.Fatalf("job without routed models has a model section: %#v", sections)
+	}
+	for _, test := range []struct {
+		models         []string
+		title, summary string
+	}{
+		{[]string{"meta/routed-a"}, "Model used", "meta/routed-a"},
+		{[]string{"meta/routed-a", "qwen/routed-b"}, "Models used", "meta/routed-a, qwen/routed-b"},
+	} {
+		details.Models = test.models
+		sections, err := buildJobViewSections(details)
+		if err != nil {
+			t.Fatal(err)
+		}
+		last := sections[len(sections)-1]
+		if sections[len(sections)-2].Title != "Transcript" || last.Title != test.title ||
+			last.Summary != test.summary || len(last.Lines) != len(test.models) {
+			t.Fatalf("model section = %#v", sections)
 		}
 	}
 }

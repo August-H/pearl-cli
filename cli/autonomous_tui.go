@@ -154,7 +154,7 @@ func autonomousTUILoop(
 	go func() {
 		reader := bufio.NewReader(input)
 		for {
-			character, _, err := reader.ReadRune()
+			character, err := readTerminalKey(reader)
 			select {
 			case inputReady <- inputResult{character: character, err: err}:
 			case <-ctx.Done():
@@ -175,7 +175,7 @@ func autonomousTUILoop(
 				return result.err
 			}
 			switch result.character {
-			case 3, 4, 'q', 'Q':
+			case 3, 4, escapeKey:
 				return nil
 			case 'r', 'R':
 				draw(true)
@@ -256,7 +256,7 @@ func renderAutonomousScreen(
 ) string {
 	return renderAutonomousScreenWithHint(
 		details, activity, loadErr, width, height, color,
-		"q detach · r refresh · work continues in daemon",
+		"Esc detach · r refresh · work continues in daemon",
 	)
 }
 

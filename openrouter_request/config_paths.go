@@ -38,6 +38,10 @@ func pearlConfigFiles(filename string, includeWorkingDirectory bool) []string {
 	return paths
 }
 
+func LoadOpenRouterAPIKey() (string, error) {
+	return loadOpenRouterAPIKey()
+}
+
 // loadOpenRouterAPIKey reads Pearl's config on every request so a daemon that
 // is already running immediately sees keys saved by `pearl configure`.
 func loadOpenRouterAPIKey() (string, error) {
@@ -186,7 +190,15 @@ func ConfigureAgentModel(model string) (string, error) {
 	if model == "" {
 		return "", errors.New("model cannot be empty")
 	}
+	return configureAgentSetting("model", model)
+}
 
+// ConfigureDefaultHarness sets the harness that runs jobs created without one.
+func ConfigureDefaultHarness(harness string) (string, error) {
+	return configureAgentSetting("harness", strings.TrimSpace(harness))
+}
+
+func configureAgentSetting(key, value string) (string, error) {
 	settingsPath, err := EnsureAgentSettings()
 	if err != nil {
 		return "", err
@@ -199,11 +211,11 @@ func ConfigureAgentModel(model string) (string, error) {
 	if err := json.Unmarshal(contents, &settings); err != nil {
 		return "", fmt.Errorf("decode %s: %w", settingsPath, err)
 	}
-	encodedModel, err := json.Marshal(model)
+	encodedValue, err := json.Marshal(value)
 	if err != nil {
-		return "", fmt.Errorf("encode model: %w", err)
+		return "", fmt.Errorf("encode %s: %w", key, err)
 	}
-	settings["model"] = encodedModel
+	settings[key] = encodedValue
 	updated, err := json.MarshalIndent(settings, "", "  ")
 	if err != nil {
 		return "", fmt.Errorf("encode %s: %w", settingsPath, err)

@@ -74,7 +74,8 @@ func runJSONCommand(args []string) int {
 				Transcript json.RawMessage       `json:"transcript"`
 				Tools      []store.ToolExecution `json:"tool_executions"`
 				Events     []store.Event         `json:"status_events"`
-			}{details.Job, transcript, details.ToolExecutions, details.StatusEvents}, nil)
+				Models     []string              `json:"models,omitempty"`
+			}{details.Job, transcript, details.ToolExecutions, details.StatusEvents, details.Models}, nil)
 		}
 		var jobs []store.Job
 		if args[0] == "archive" {

@@ -30,6 +30,10 @@ type modelRow struct {
 	current  bool
 	label    string
 	starred  bool
+	// Prices are formatted per million tokens; "" means unknown.
+	inputPrice     string
+	outputPrice    string
+	cacheReadPrice string
 }
 
 var starredModelLabs = []struct{ provider, label string }{
@@ -67,9 +71,10 @@ func modelLabTitle(row modelRow) string {
 	return label
 }
 
-// buildModelRows groups models added within the past calendar year by
-// provider, newest first. Undated and future-dated models, media models, batch
-// variants, and GPT Pro variants are hidden. The Free Tier router always leads.
+// buildModelRows groups models added within the past calendar year (past six
+// months for starred labs) by provider, newest first. Undated and future-dated
+// models, media models, batch variants, and GPT Pro variants are hidden. The
+// Free Tier router always leads.
 func buildModelRows(
 	models []openrouter_request.OpenRouterModel,
 	currentID string,
@@ -84,6 +89,7 @@ func buildModelRowsAt(
 ) []modelRow {
 	currentID = strings.TrimSpace(currentID)
 	cutoff := now.AddDate(-1, 0, 0).Unix()
+	starredCutoff := now.AddDate(0, -6, 0).Unix()
 	latest := now.Unix()
 	models = append([]openrouter_request.OpenRouterModel(nil), models...)
 	sort.Slice(models, func(left, right int) bool {
@@ -101,9 +107,11 @@ func buildModelRowsAt(
 	rows = append(rows, modelRow{kind: modelRowHeader, provider: "Pearl"})
 	rows = append(rows, modelRow{
 		kind: modelRowOption, provider: "Pearl",
-		id:      openrouter_request.FreeTierModel,
-		name:    "Free Tier",
-		current: currentID == openrouter_request.FreeTierModel,
+		id:          openrouter_request.FreeTierModel,
+		name:        "Free Tier",
+		current:     currentID == openrouter_request.FreeTierModel,
+		inputPrice:  "$0",
+		outputPrice: "$0",
 	})
 	lastProvider := ""
 	seen := map[string]bool{openrouter_request.FreeTierModel: true}
@@ -111,11 +119,14 @@ func buildModelRowsAt(
 		if model.Created <= 0 || model.Created < cutoff || model.Created > latest {
 			continue
 		}
+		provider := openrouter_request.ModelProvider(model.ID)
+		if modelLabRank(provider) < len(starredModelLabs) && model.Created < starredCutoff {
+			continue
+		}
 		if model.ID == "" || seen[model.ID] || isHiddenCatalogueModel(model) {
 			continue
 		}
 		seen[model.ID] = true
-		provider := openrouter_request.ModelProvider(model.ID)
 		if provider != lastProvider {
 			rows = append(rows, modelRow{kind: modelRowHeader, provider: provider})
 			lastProvider = provider
@@ -123,10 +134,13 @@ func buildModelRowsAt(
 		name := strings.TrimSpace(model.Name)
 		rows = append(rows, modelRow{
 			kind: modelRowOption, provider: provider,
-			id:      model.ID,
-			name:    name,
-			context: openrouter_request.FormatContextLength(model.ContextLength),
-			current: model.ID == currentID,
+			id:             model.ID,
+			name:           name,
+			context:        openrouter_request.FormatContextLength(model.ContextLength),
+			current:        model.ID == currentID,
+			inputPrice:     openrouter_request.FormatMillionTokenPrice(model.InputPrice),
+			outputPrice:    openrouter_request.FormatMillionTokenPrice(model.OutputPrice),
+			cacheReadPrice: openrouter_request.FormatMillionTokenPrice(model.CacheReadPrice),
 		})
 	}
 	return rows
@@ -177,8 +191,19 @@ func isHiddenCatalogueModel(model openrouter_request.OpenRouterModel) bool {
 	return false
 }
 
-// filterModelRows keeps options matching the query (case-insensitive substring
-// over provider, ID and name) plus the headers above surviving options.
+// modelSearchText is the model's own name and ID slug, without the lab, so a
+// query like "anthropic" doesn't match every Anthropic model.
+func modelSearchText(row modelRow) string {
+	_, slug, _ := strings.Cut(row.id, "/")
+	name := strings.TrimSpace(row.name)
+	if _, model, found := strings.Cut(name, ": "); found {
+		name = model
+	}
+	return strings.ToLower(name + " " + slug)
+}
+
+// filterModelRows keeps options whose model name or ID slug contains the query
+// (case-insensitive) plus the headers above surviving options.
 func filterModelRows(rows []modelRow, query string) []modelRow {
 	query = strings.ToLower(strings.TrimSpace(query))
 	if query == "" {
@@ -198,8 +223,7 @@ func filterModelRows(rows []modelRow, query string) []modelRow {
 			pendingHeader = &header
 			continue
 		}
-		haystack := strings.ToLower(row.provider + " " + row.id + " " + row.name + " " + row.label)
-		if strings.Contains(haystack, query) {
+		if row.kind == modelRowOption && strings.Contains(modelSearchText(row), query) {
 			flushHeader()
 			filtered = append(filtered, row)
 		}
@@ -284,12 +308,19 @@ func renderModelScreenCore(
 	title := "Pearl · model"
 	count := fmt.Sprintf("%d models", len(selectable))
 	labs := len(visible) > 0 && visible[0].kind == modelRowLab
+	searchingLabs := picker != nil && picker.searchingAllLabs()
 	if picker != nil {
-		labs = picker.lab == ""
+		labs = picker.lab == "" && !searchingLabs
+	}
+	layout := modelPriceLayoutFor(visible, width)
+	if layout.show {
+		count += " · $ per 1M tokens"
 	}
 	if labs {
 		title += " · labs"
 		count = fmt.Sprintf("%d labs", len(selectable))
+	} else if searchingLabs {
+		title += " · all labs"
 	} else if picker != nil {
 		title += " · " + modelLabDisplayName(picker.lab)
 	} else if len(visible) > 0 && visible[0].kind == modelRowOption {
@@ -305,12 +336,12 @@ func renderModelScreenCore(
 	}
 	filterLine := "Filter: " + filter + "▏"
 	if picker != nil && !picker.filtering {
-		filterLine = "Filter: / to search"
+		filterLine = "Filter: type to search"
 	}
 	headers := []string{
 		dashboardPaint(color, ansiBold+ansiCyan, dashboardTruncate(title, width)),
 		dashboardPaint(color, ansiDim, divider),
-		dashboardPaint(color, ansiDim, dashboardTruncate(status, width)),
+		dashboardTruncate(status, width),
 		dashboardPaint(color, ansiDim, dashboardTruncate(filterLine, width)),
 	}
 	if notice != "" {
@@ -327,7 +358,7 @@ func renderModelScreenCore(
 	for index := scroll; index < end; index++ {
 		row := visible[index]
 		if row.kind == modelRowHeader {
-			label := "─ " + row.provider + " ─"
+			label := "─ " + modelLabDisplayName(row.provider) + " ─"
 			fmt.Fprintln(&frame, dashboardPaint(color, ansiBold+ansiCyan, dashboardTruncate(label, width)))
 			shown++
 			continue
@@ -336,7 +367,7 @@ func renderModelScreenCore(
 		if row.kind == modelRowLab {
 			row.id, row.context = modelLabTitle(row), ""
 		}
-		fmt.Fprintln(&frame, renderModelOption(row, isSelected, width, color))
+		fmt.Fprintln(&frame, renderModelOption(row, isSelected, width, color, layout))
 		shown++
 	}
 	for row := shown; row < bodyHeight; row++ {
@@ -349,14 +380,16 @@ func renderModelScreenCore(
 	if len(selectable) > 0 {
 		position = fmt.Sprintf("%d/%d", selected+1, len(selectable))
 	}
-	hint := "↑/↓/scroll · Enter select · ← labs · / filter · q back"
+	hint := "↑/↓/scroll · Enter select · ← labs · / filter · Esc back"
 	if labs {
-		hint = "↑/↓/scroll · Enter open lab · / filter · q back"
+		hint = "↑/↓/scroll · Enter open lab · / filter · Esc back"
 	}
 	if picker != nil && picker.filtering {
-		hint = "↑/↓/scroll · Enter select · ← labs · Ctrl-U clear · Ctrl-C quit"
+		hint = "↑/↓/scroll · Enter select · ← labs · Esc clear · Ctrl-C quit"
 		if labs {
-			hint = "↑/↓/scroll · Enter open lab · Ctrl-U clear · Ctrl-C quit"
+			hint = "↑/↓/scroll · Enter open lab · Esc clear · Ctrl-C quit"
+		} else if searchingLabs {
+			hint = "↑/↓/scroll · Enter select · Esc clear · Ctrl-C quit"
 		}
 	}
 	if len([]rune(hint))+len([]rune(position))+1 <= width {
@@ -368,7 +401,88 @@ func renderModelScreenCore(
 	return modelScreen{Frame: strings.TrimSuffix(frame.String(), "\n"), BodyHeight: bodyHeight, Scroll: scroll}
 }
 
-func renderModelOption(row modelRow, selected bool, width int, color bool) string {
+const (
+	modelOptionIndent   = 4
+	modelPriceGap       = 2
+	modelMinNameColumns = 16
+)
+
+// modelPriceLayout aligns price columns across every visible row, not just
+// the rows on screen, so columns stay put while scrolling.
+type modelPriceLayout struct {
+	show      bool
+	nameWidth int
+	columns   [3]int
+}
+
+func modelOptionLabel(row modelRow) string {
+	label := row.id
+	if row.kind == modelRowLab {
+		label += "  " + row.name
+	} else if name := strings.TrimSpace(row.name); name != "" {
+		label = name
+	}
+	return label
+}
+
+func modelPriceParts(row modelRow) [3]string {
+	if row.kind != modelRowOption {
+		return [3]string{}
+	}
+	if row.inputPrice == "$0" && row.outputPrice == "$0" {
+		return [3]string{"free"}
+	}
+	var parts [3]string
+	for index, part := range []struct{ label, price string }{
+		{"in", row.inputPrice}, {"out", row.outputPrice}, {"cache", row.cacheReadPrice},
+	} {
+		if part.price != "" {
+			parts[index] = part.label + " " + part.price
+		}
+	}
+	return parts
+}
+
+func modelPriceLayoutFor(rows []modelRow, width int) modelPriceLayout {
+	var layout modelPriceLayout
+	for _, row := range rows {
+		if row.kind != modelRowOption {
+			continue
+		}
+		layout.nameWidth = max(layout.nameWidth, len([]rune(modelOptionLabel(row))))
+		for index, part := range modelPriceParts(row) {
+			layout.columns[index] = max(layout.columns[index], len([]rune(part)))
+		}
+	}
+	priceWidth := 0
+	for _, column := range layout.columns {
+		if column > 0 {
+			priceWidth += column + modelPriceGap
+		}
+	}
+	if priceWidth == 0 {
+		return modelPriceLayout{}
+	}
+	longest := layout.nameWidth
+	layout.nameWidth = min(longest, width-modelOptionIndent-priceWidth)
+	layout.show = layout.nameWidth >= min(longest, modelMinNameColumns)
+	return layout
+}
+
+func modelPriceText(row modelRow, layout modelPriceLayout) string {
+	var text strings.Builder
+	for index, part := range modelPriceParts(row) {
+		if layout.columns[index] == 0 {
+			continue
+		}
+		text.WriteString(strings.Repeat(" ", modelPriceGap))
+		text.WriteString(part)
+		text.WriteString(strings.Repeat(" ", layout.columns[index]-len([]rune(part))))
+	}
+	return strings.TrimRight(text.String(), " ")
+}
+
+func renderModelOption(row modelRow, selected bool, width int, color bool, layout modelPriceLayout) string {
 	prefix := "  "
 	if selected {
 		prefix = "› "
@@ -377,14 +491,16 @@ func renderModelOption(row modelRow, selected bool, width int, color bool) strin
 	if row.current {
 		marker = "● "
 	}
-	label := row.id
-	if row.kind == modelRowLab {
-		label += "  " + row.name
-	} else if name := strings.TrimSpace(row.name); name != "" {
-		label = name
+	label := modelOptionLabel(row)
+	price := ""
+	if layout.show {
+		price = modelPriceText(row, layout)
 	}
-	line := prefix + marker + label
-	line = dashboardTruncate(line, width)
+	if price != "" {
+		label = dashboardTruncate(label, layout.nameWidth)
+		label += strings.Repeat(" ", layout.nameWidth-len([]rune(label)))
+	}
+	line := dashboardTruncate(prefix+marker+label+price, width)
 	if !color {
 		return line
 	}
@@ -393,6 +509,9 @@ func renderModelOption(row modelRow, selected bool, width int, color bool) strin
 	}
 	if row.current {
 		return dashboardPaint(true, ansiGreen, line)
+	}
+	if price != "" && strings.HasSuffix(line, price) {
+		return strings.TrimSuffix(line, price) + dashboardPaint(true, ansiDim, price)
 	}
 	return line
 }
@@ -468,12 +587,35 @@ func (state *modelPickerState) scope() []modelRow {
 	return rows
 }
 
+// searchingAllLabs reports whether a query typed on the labs screen is listing
+// matching models from every lab in place of the labs themselves.
+func (state *modelPickerState) searchingAllLabs() bool {
+	return state.lab == "" && strings.TrimSpace(state.filter) != ""
+}
+
+func (state *modelPickerState) filtered() []modelRow {
+	if !state.searchingAllLabs() {
+		return filterModelRows(state.scope(), state.filter)
+	}
+	var rows []modelRow
+	for _, lab := range buildModelLabRows(state.rows) {
+		group := []modelRow{{kind: modelRowHeader, provider: lab.provider}}
+		for _, row := range state.rows {
+			if row.kind == modelRowOption && row.provider == lab.provider {
+				group = append(group, row)
+			}
+		}
+		rows = append(rows, filterModelRows(group, state.filter)...)
+	}
+	return rows
+}
+
 func (state *modelPickerState) refilter() {
 	previous := ""
 	if indexes := selectableModelIndexes(state.visible); state.selected >= 0 && state.selected < len(indexes) {
 		previous = state.visible[indexes[state.selected]].id
 	}
-	state.visible = filterModelRows(state.scope(), state.filter)
+	state.visible = state.filtered()
 	state.selected, state.scroll = 0, 0
 	for position, index := range selectableModelIndexes(state.visible) {
 		if state.visible[index].id == previous {
@@ -489,7 +631,7 @@ func (state *modelPickerState) back() bool {
 	}
 	state.lab = ""
 	state.filter, state.filtering = state.labFilter, state.labFiltering
-	state.visible = filterModelRows(state.scope(), state.filter)
+	state.visible = state.filtered()
 	state.selected, state.scroll = state.labSelected, state.labScroll
 	return false
 }
@@ -553,10 +695,13 @@ func (state *modelPickerState) handleKey(character rune) (string, bool) {
 	switch character {
 	case 3, 4:
 		return "", true
-	case 'q', 'Q':
-		if !state.filtering {
-			return "", state.back()
+	case escapeKey:
+		if state.filtering || state.filter != "" {
+			state.filter, state.filtering = "", false
+			state.refilter()
+			return "", false
 		}
+		return "", state.back()
 	case '\r', '\n':
 		id := state.activate()
 		return id, id != ""
@@ -570,8 +715,8 @@ func (state *modelPickerState) handleKey(character rune) (string, bool) {
 			state.refilter()
 		} else if state.filtering {
 			state.filtering = false
-		} else {
-			return "", state.back()
+		} else if state.lab != "" {
+			state.back()
 		}
 		return "", false
 	case 21:
@@ -605,9 +750,6 @@ func (state *modelPickerState) screen(width, height int, color bool) modelScreen
 	notice := state.notice
 	if len(state.visible) == 0 {
 		notice = "No models match."
-		if state.lab == "" {
-			notice = "No labs match."
-		}
 	}
 	screen := renderModelPickerScreen(state, notice, width, height, color)
 	state.bodyHeight, state.scroll = screen.BodyHeight, screen.Scroll
@@ -640,7 +782,7 @@ func runModelTUI(input, output *os.File, rows []modelRow, currentID, notice stri
 	reader := bufio.NewReader(input)
 	escapeSequence := ""
 	for {
-		character, _, err := reader.ReadRune()
+		character, err := readTerminalKey(reader)
 		if err != nil {
 			return "", err
 		}

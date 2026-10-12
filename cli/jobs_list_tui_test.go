@@ -53,7 +53,7 @@ func TestJobsListFooterShowsTheSelectedSpaceAction(t *testing.T) {
 		{status: store.JobRunning, label: ""},
 	}
 	for _, test := range tests {
-		footer := jobsListFooter([]store.Job{{Status: test.status}}, 0, "q back")
+		footer := jobsListFooter([]store.Job{{Status: test.status}}, 0, "Esc back")
 		if test.label != "" && !strings.Contains(footer, test.label) {
 			t.Fatalf("%s footer = %q, want %q", test.status, footer, test.label)
 		}
@@ -67,7 +67,7 @@ func TestJobsListFooterShowsTheSelectedSpaceAction(t *testing.T) {
 
 	confirmation := renderJobsListScreenWithFooter(
 		[]store.Job{{ID: "polar-hare", Status: store.JobFailed}},
-		80, 10, 0, 0, false, "q back", "Archive polar-hare? y confirm · n cancel",
+		80, 10, 0, 0, false, "Esc back", "Archive polar-hare? y confirm · n cancel",
 	)
 	if !strings.Contains(confirmation.Frame, "Archive polar-hare? y confirm · n cancel") {
 		t.Fatalf("archive confirmation is missing:\n%s", confirmation.Frame)
@@ -76,12 +76,12 @@ func TestJobsListFooterShowsTheSelectedSpaceAction(t *testing.T) {
 
 func TestArchivedJobsListHasNoRunOrArchiveActions(t *testing.T) {
 	jobs := []store.Job{{ID: "polar-hare", Status: store.JobFailed}}
-	footer := archivedJobsListFooter(jobs, 0, "q back")
-	if footer != "q back · ↑/↓ navigate · Enter view" {
+	footer := archivedJobsListFooter(jobs, 0, "Esc back")
+	if footer != "Esc back · ↑/↓ navigate · Enter view" {
 		t.Fatalf("archive footer = %q", footer)
 	}
 	screen := renderJobsListScreenWithTitleAndFooter(
-		jobs, 80, 10, 0, 0, false, "q back", footer, "Pearl archive",
+		jobs, 80, 10, 0, 0, false, "Esc back", footer, "Pearl archive",
 	)
 	for _, expected := range []string{"Pearl archive", "polar-hare", "Enter view"} {
 		if !strings.Contains(screen.Frame, expected) {

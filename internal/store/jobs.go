@@ -27,17 +27,48 @@ func (s *Store) CreatePendingNamedJob(
 	return s.createNamedJob(ctx, name, prompt, workspaceRoot, JobPending)
 }
 
+// CreatePendingJob creates a pending job that runs with the given harness, or
+// with the default harness when harness is empty.
+func (s *Store) CreatePendingJob(
+	ctx context.Context,
+	name, prompt, workspaceRoot, harness string,
+) (Job, error) {
+	return s.createJob(ctx, name, prompt, workspaceRoot, harness, JobPending)
+}
+
+// SetJobHarness records the harness that runs a job.
+func (s *Store) SetJobHarness(ctx context.Context, id, harness string) error {
+	harness, err := NormalizeHarness(harness)
+	if err != nil {
+		return err
+	}
+	_, err = s.db.ExecContext(ctx, "UPDATE jobs SET harness = ? WHERE id = ?", harness, id)
+	return err
+}
+
 func (s *Store) createNamedJob(
 	ctx context.Context,
 	name, prompt, workspaceRoot, status string,
+) (Job, error) {
+	return s.createJob(ctx, name, prompt, workspaceRoot, "", status)
+}
+
+func (s *Store) createJob(
+	ctx context.Context,
+	name, prompt, workspaceRoot, harness, status string,
 ) (Job, error) {
 	name = strings.TrimSpace(name)
 	if err := ValidateJobName(name); err != nil {
 		return Job{}, err
 	}
+	harness, err := NormalizeHarness(harness)
+	if err != nil {
+		return Job{}, err
+	}
 	job := Job{
 		Prompt:        prompt,
 		WorkspaceRoot: workspaceRoot,
+		Harness:       harness,
 		Status:        status,
 		CreatedAt:     time.Now().UTC(),
 	}
@@ -65,9 +96,9 @@ func (s *Store) createNamedJob(
 		}
 	}
 	if _, err := transaction.ExecContext(ctx, `
-INSERT INTO jobs(id, prompt, workspace_root, status, created_at)
-VALUES (?, ?, ?, ?, ?)`, job.ID, job.Prompt, job.WorkspaceRoot, job.Status,
-		job.CreatedAt.Format(time.RFC3339Nano)); err != nil {
+INSERT INTO jobs(id, prompt, workspace_root, status, created_at, harness)
+VALUES (?, ?, ?, ?, ?, ?)`, job.ID, job.Prompt, job.WorkspaceRoot, job.Status,
+		job.CreatedAt.Format(time.RFC3339Nano), job.Harness); err != nil {
 		return Job{}, err
 	}
 	if _, err := appendEventTx(ctx, transaction, job.ID, "status", job.Status); err != nil {
@@ -719,9 +750,13 @@ WHERE job_id = ? AND sequence > ? ORDER BY sequence LIMIT ?`, jobID, sequence, l
 }
 
 func (s *Store) StatusTransitions(ctx context.Context, jobID string) ([]Event, error) {
+	return s.EventsOfType(ctx, jobID, "status")
+}
+
+func (s *Store) EventsOfType(ctx context.Context, jobID, eventType string) ([]Event, error) {
 	rows, err := s.db.QueryContext(ctx, `
 SELECT sequence, job_id, type, data, created_at FROM events
-WHERE job_id = ? AND type = 'status' ORDER BY sequence`, jobID)
+WHERE job_id = ? AND type = ? ORDER BY sequence`, jobID, eventType)
 	if err != nil {
 		return nil, err
 	}

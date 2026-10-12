@@ -81,10 +81,10 @@ func TestRenderAutonomousScreenUsesDashboardNavigationHint(t *testing.T) {
 			WorkspaceRoot: "/work/pearl",
 		}},
 		nil, nil, 80, 16, false,
-		"q back · r refresh · work continues in daemon",
+		"Esc back · r refresh · work continues in daemon",
 	)
-	if !strings.Contains(output, "q back · r refresh") ||
-		strings.Contains(output, "q detach") {
+	if !strings.Contains(output, "Esc back · r refresh") ||
+		strings.Contains(output, "Esc detach") {
 		t.Fatalf("dashboard autonomous hint is wrong:\n%s", output)
 	}
 }

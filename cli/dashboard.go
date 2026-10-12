@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -30,6 +31,7 @@ const (
 	ansiRed     = "\x1b[31m"
 	ansiGreen   = "\x1b[32m"
 	ansiYellow  = "\x1b[33m"
+	ansiBlue    = "\x1b[34m"
 	ansiMagenta = "\x1b[35m"
 	ansiCyan    = "\x1b[36m"
 )
@@ -39,6 +41,7 @@ const (
 	dashboardCommandOutputLimit = 100
 	dashboardCommandBufferLimit = 64 * 1024
 	dashboardTitle              = "Pearl"
+	dashboardThinkingMessage    = "Thinking..."
 )
 
 type dashboardCommandSuggestion struct {
@@ -62,6 +65,55 @@ type dashboardCommandView struct {
 	running       bool
 	exitCode      int
 	configureStep dashboardConfigureStep
+	recalling     bool
+	model         string
+}
+
+const dashboardHistoryLimit = 100
+
+// dashboardHistory recalls sent commands with ↑/↓, newest first.
+type dashboardHistory struct {
+	entries  []string
+	index    int
+	browsing bool
+}
+
+func (history *dashboardHistory) add(command string) {
+	history.browsing = false
+	command = strings.TrimSpace(command)
+	if command == "" || len(history.entries) > 0 && history.entries[len(history.entries)-1] == command {
+		return
+	}
+	history.entries = append(history.entries, command)
+	if len(history.entries) > dashboardHistoryLimit {
+		history.entries = history.entries[len(history.entries)-dashboardHistoryLimit:]
+	}
+}
+
+// previous returns the next older command, staying on the oldest.
+func (history *dashboardHistory) previous() (string, bool) {
+	if len(history.entries) == 0 {
+		return "", false
+	}
+	if !history.browsing {
+		history.browsing, history.index = true, len(history.entries)-1
+	} else if history.index > 0 {
+		history.index--
+	}
+	return history.entries[history.index], true
+}
+
+// next returns the next newer command, or an empty prompt past the newest.
+func (history *dashboardHistory) next() (string, bool) {
+	if !history.browsing {
+		return "", false
+	}
+	if history.index < len(history.entries)-1 {
+		history.index++
+		return history.entries[history.index], true
+	}
+	history.browsing = false
+	return "", true
 }
 
 type dashboardJobsView struct {
@@ -122,8 +174,13 @@ var dashboardCommandOptions = []dashboardCommandSuggestion{
 	{usage: "archive", completion: "archive", description: "List archived jobs"},
 	{usage: "autonomous <goal>", completion: "autonomous ", description: "Start an autonomous session"},
 	{usage: "autonomous --resume <session-id>", completion: "autonomous --resume ", description: "Resume an autonomous session"},
-	{usage: "job [-n name] <prompt>", completion: "job ", description: "Create a job"},
-	{usage: "job --directory [-n name] <prompt>", completion: "job --directory ", description: "Choose the job directory"},
+	{usage: "job <prompt>", completion: "job ", description: "Create a job in the current directory"},
+	{usage: "job <prompt> -n <name>", completion: "job ", description: "Give the job a custom ID"},
+	{usage: "job <prompt> [-n name] --directory", completion: "job ", description: "Choose the job directory"},
+	{usage: "job <prompt> --harness codex", completion: "job ", description: "Run this job with Codex"},
+	{usage: "harness", completion: "harness", description: "Show the default agent harness"},
+	{usage: "harness codex", completion: "harness codex", description: "Run new jobs with Codex"},
+	{usage: "harness pearl", completion: "harness pearl", description: "Run new jobs with Pearl's harness"},
 	{usage: "status", completion: "status", description: "Show daemon and queue status"},
 	{usage: "update", completion: "update", description: "Update Pearl to the latest release"},
 	{usage: "attach <job-id>", completion: "attach ", description: "Stream a job's output"},
@@ -152,6 +209,7 @@ var dashboardCommandDescriptions = map[string]string{
 	"run":        "Run or retry a job",
 	"configure":  "Set the API key and model",
 	"model":      "Browse and set the model",
+	"harness":    "Show or set the default agent harness",
 	"jobs":       "List the job board",
 	"archive":    "List archived jobs",
 	"autonomous": "Open or start autonomous mode",
@@ -232,6 +290,8 @@ func dashboardLoop(
 	commandText := ""
 	notice := ""
 	selectedSuggestion := 0
+	var history dashboardHistory
+	currentModel := currentModelID()
 	commandView := dashboardCommandView{}
 	configureAPIKey := ""
 	var commandCancel context.CancelFunc
@@ -273,6 +333,10 @@ func dashboardLoop(
 		}
 		inputLock.Unlock()
 		if refreshJobs {
+			model := currentModelID()
+			inputLock.Lock()
+			currentModel = model
+			inputLock.Unlock()
 			requestContext, cancel := context.WithTimeout(sessionContext, 2*time.Second)
 			if autonomousID != "" {
 				loaded, loadedErr := client.autonomousDetails(requestContext, autonomousID)
@@ -343,7 +407,7 @@ func dashboardLoop(
 				width,
 				height,
 				color,
-				"q back · r refresh · work continues in daemon",
+				"Esc back · r refresh · work continues in daemon",
 			)
 			inputLock.Unlock()
 			fmt.Fprint(output, "\x1b[H\x1b[2J", dashboardTerminalFrame(frame))
@@ -353,7 +417,7 @@ func dashboardLoop(
 			view := *jobDetailsView
 			screen := renderJobViewScreenWithQuitLabel(
 				view.job, view.sections, width, height,
-				view.selected, view.scroll, color, "q back",
+				view.selected, view.scroll, color, "Esc back",
 			)
 			if view.keepSelected && view.selected >= 0 &&
 				view.selected < len(screen.HeaderPositions) {
@@ -365,7 +429,7 @@ func dashboardLoop(
 				}
 				screen = renderJobViewScreenWithQuitLabel(
 					view.job, view.sections, width, height,
-					view.selected, view.scroll, color, "q back",
+					view.selected, view.scroll, color, "Esc back",
 				)
 			}
 			view.scroll = min(
@@ -404,12 +468,12 @@ func dashboardLoop(
 			} else if jobsView.notice != "" {
 				mode := jobsListMode{allowActions: !jobsView.archived}
 				footer = jobsView.notice + " · " + jobsListModeFooter(
-					mode, visibleJobs, jobsView.selected, "q back",
+					mode, visibleJobs, jobsView.selected, "Esc back",
 				)
 			}
 			mode := jobsListMode{allowActions: !jobsView.archived}
 			if footer == "" {
-				footer = jobsListModeFooter(mode, visibleJobs, jobsView.selected, "q back")
+				footer = jobsListModeFooter(mode, visibleJobs, jobsView.selected, "Esc back")
 			}
 			title := "Pearl"
 			if jobsView.archived {
@@ -424,7 +488,7 @@ func dashboardLoop(
 			}
 			screen := renderList(
 				visibleJobs, width, height, jobsView.selected, jobsView.scroll,
-				color, "q back", footer, title,
+				color, "Esc back", footer, title,
 			)
 			jobsView.bodyHeight = screen.BodyHeight
 			inputLock.Unlock()
@@ -435,6 +499,8 @@ func dashboardLoop(
 		visibleNotice := notice
 		visibleSuggestion := selectedSuggestion
 		visibleCommandView := commandView
+		visibleCommandView.recalling = history.browsing
+		visibleCommandView.model = displayCurrentModel(currentModel)
 		inputLock.Unlock()
 		fmt.Fprint(output, "\x1b[H\x1b[2J")
 		frame := renderDashboardState(
@@ -502,7 +568,7 @@ func dashboardLoop(
 	for {
 		resultReady := make(chan readResult, 1)
 		go func() {
-			character, _, err := reader.ReadRune()
+			character, err := readTerminalKey(reader)
 			resultReady <- readResult{character: character, err: err}
 		}()
 		var result readResult
@@ -541,6 +607,16 @@ func dashboardLoop(
 				if !dashboardApplyJobsViewAction(&jobsView, action, len(suggestionJobs)) {
 					inputLock.Unlock()
 					continue
+				}
+			case (action == "previous" || action == "next") &&
+				commandView.configureStep == dashboardConfigureInactive &&
+				(history.browsing || commandText == ""):
+				recall := history.next
+				if action == "previous" {
+					recall = history.previous
+				}
+				if recalled, ok := recall(); ok {
+					commandText, selectedSuggestion = recalled, 0
 				}
 			case action == "previous" || action == "next":
 				direction := 1
@@ -581,6 +657,7 @@ func dashboardLoop(
 					modelView.notice = "Model: " + dashboardText(saveErr.Error())
 				} else {
 					modelView = nil
+					currentModel = chosen
 					notice = "Model: " + chosen
 				}
 				inputLock.Unlock()
@@ -591,7 +668,7 @@ func dashboardLoop(
 		if autonomousView != nil {
 			refreshView := false
 			switch character {
-			case 3, 4, 'q', 'Q':
+			case 3, 4, escapeKey:
 				autonomousView = nil
 				refreshView = true
 			case 'r', 'R':
@@ -607,7 +684,7 @@ func dashboardLoop(
 			back := false
 			action := ""
 			switch character {
-			case 3, 4, 'q', 'Q':
+			case 3, 4, escapeKey:
 				back = true
 			case '\r', '\n', ' ':
 				action = "toggle"
@@ -648,7 +725,7 @@ func dashboardLoop(
 						jobsView.selected = min(max(0, jobsView.selected), len(navigationJobs)-1)
 						archiveJobID = navigationJobs[jobsView.selected].ID
 					}
-				case 3, 4, 'n', 'N', 'q', 'Q':
+				case 3, 4, 'n', 'N', escapeKey:
 					jobsView.confirmArchive = false
 					jobsView.notice = ""
 				}
@@ -674,7 +751,7 @@ func dashboardLoop(
 			openJobID := ""
 			refreshAfterToggle := false
 			switch character {
-			case 3, 4, 'q', 'Q':
+			case 3, 4, escapeKey:
 				jobsView.open = false
 			case 'a', 'A':
 				jobsView.showAll = !jobsView.showAll
@@ -735,7 +812,16 @@ func dashboardLoop(
 			continue
 		}
 		notice = ""
+		history.browsing = false
 		switch character {
+		case escapeKey:
+			if commandView.configureStep != dashboardConfigureInactive {
+				configureAPIKey = ""
+				commandText = ""
+				selectedSuggestion = 0
+				commandView = dashboardCommandView{}
+				notice = "Configuration canceled."
+			}
 		case 3:
 			if commandView.configureStep != dashboardConfigureInactive {
 				configureAPIKey = ""
@@ -830,6 +916,7 @@ func dashboardLoop(
 						continue
 					default:
 						notice = "Choose free or custom."
+						commandText, selectedSuggestion = "", 0
 						inputLock.Unlock()
 						draw(false)
 						continue
@@ -848,8 +935,10 @@ func dashboardLoop(
 					continue
 				}
 			}
+			history.add(commandText)
 			if commandView.running {
 				notice = "Wait for the running command or press Ctrl-C to cancel it."
+				commandText, selectedSuggestion = "", 0
 				inputLock.Unlock()
 				draw(false)
 				continue
@@ -857,6 +946,7 @@ func dashboardLoop(
 			parsed, parseErr := parseDashboardCommand(commandText)
 			if parseErr != nil {
 				notice = parseErr.Error()
+				commandText, selectedSuggestion = "", 0
 				inputLock.Unlock()
 				draw(false)
 				continue
@@ -1079,6 +1169,8 @@ func dashboardLoop(
 				}(append([]string(nil), parsed...))
 				continue
 			}
+			// Accepted commands continue above; anything left was rejected.
+			commandText, selectedSuggestion = "", 0
 		default:
 			if !unicode.IsControl(character) && len([]rune(commandText)) < 4096 {
 				commandText += string(character)
@@ -1801,7 +1893,8 @@ func renderDashboardState(
 	fmt.Fprintln(&frame)
 	fmt.Fprint(&frame, renderDashboardComposer(
 		jobs, commandText, notice, width, color, selectedSuggestion, commandView.running,
-		commandView.configureStep, running, queued, waiting, loadErr == nil,
+		commandView.configureStep, commandView.recalling, commandView.model,
+		running, queued, waiting, loadErr == nil,
 	))
 	return frame.String()
 }
@@ -1838,9 +1931,13 @@ func renderDashboardCommandOutput(
 	}
 	fmt.Fprintln(&output, strings.Repeat("─", width))
 	lines := dashboardCommandOutputLines(view.output)
+	thinking := view.running && dashboardCommandStreamsJob(view.command) &&
+		!dashboardModelOutputStarted(lines)
 	if len(lines) == 0 {
 		message := "Waiting for output..."
-		if !view.running {
+		if thinking {
+			message = dashboardThinkingMessage
+		} else if !view.running {
 			message = "Command completed without output."
 		}
 		fmt.Fprintln(&output, dashboardPaint(
@@ -1848,14 +1945,76 @@ func renderDashboardCommandOutput(
 		))
 		return output.String()
 	}
+	table := dashboardCommandPrintsTable(view.command)
 	for _, line := range lines {
-		line = dashboardTruncate(dashboardOutputText(line), width)
-		if strings.TrimSpace(view.command) == "jobs" {
-			line = dashboardColorJobTableLine(line, color)
+		line = dashboardOutputText(line)
+		if table {
+			line = dashboardTruncate(line, width)
+			if strings.TrimSpace(view.command) == "jobs" {
+				line = dashboardColorJobTableLine(line, color)
+			}
+			fmt.Fprintln(&output, line)
+			continue
 		}
-		fmt.Fprintln(&output, line)
+		modelLine := strings.HasPrefix(line, "[model] ") || strings.HasPrefix(line, "[models] ")
+		for _, wrapped := range jobViewWrapLine(line, max(1, width)) {
+			if modelLine {
+				wrapped = dashboardPaint(color, ansiBlue, wrapped)
+			}
+			fmt.Fprintln(&output, wrapped)
+		}
+	}
+	if thinking {
+		fmt.Fprintln(&output, dashboardPaint(
+			color, ansiDim, dashboardTruncate(dashboardThinkingMessage, width),
+		))
 	}
 	return output.String()
+}
+
+// dashboardCommandStreamsJob reports commands that attach to a job's live output.
+func dashboardCommandStreamsJob(command string) bool {
+	fields := strings.Fields(command)
+	if len(fields) == 0 {
+		return false
+	}
+	switch fields[0] {
+	case "run":
+		return !slices.Contains(fields[1:], "--detach")
+	case "retry", "respond", "attach":
+		return true
+	}
+	return false
+}
+
+func dashboardModelOutputStarted(lines []string) bool {
+	for _, line := range lines {
+		for _, marker := range []string{"[reasoning]", "[answer]", "[tool", "[input required]"} {
+			if strings.HasPrefix(line, marker) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// dashboardCommandPrintsTable reports output whose columns would break if wrapped.
+func dashboardCommandPrintsTable(command string) bool {
+	fields := strings.Fields(command)
+	if len(fields) == 0 {
+		return false
+	}
+	switch fields[0] {
+	case "jobs":
+		return len(fields) < 2 || fields[1] != "view"
+	case "archive":
+		return true
+	case "schedule":
+		return len(fields) >= 2 && fields[1] == "list"
+	case "model":
+		return slices.Contains(fields[1:], "--list")
+	}
+	return false
 }
 
 func dashboardCommandOutputLines(value string) []string {
@@ -1944,6 +2103,8 @@ func renderDashboardComposer(
 	selectedSuggestion int,
 	commandRunning bool,
 	configureStep dashboardConfigureStep,
+	recalling bool,
+	model string,
 	running, queued, waiting int,
 	daemonActive bool,
 ) string {
@@ -2000,7 +2161,10 @@ func renderDashboardComposer(
 		padding,
 		dashboardPaint(color, ansiDim, "│"),
 	)
-	suggestions := dashboardComposerSuggestionsWithJobs(commandText, configureStep, jobs)
+	var suggestions []dashboardCommandSuggestion
+	if !recalling {
+		suggestions = dashboardComposerSuggestionsWithJobs(commandText, configureStep, jobs)
+	}
 	if len(suggestions) == 0 {
 		fmt.Fprintln(&composer, dashboardPaint(color, ansiDim, "╰"+border+"╯"))
 	} else {
@@ -2036,8 +2200,11 @@ func renderDashboardComposer(
 		}
 		fmt.Fprintln(&composer, dashboardPaint(color, ansiDim, "╰"+border+"╯"))
 	}
+	if model != "" {
+		fmt.Fprintln(&composer, dashboardTruncate("  Current model: "+model, width))
+	}
 
-	leftHint := "  Enter to run · Ctrl-C to exit"
+	leftHint := ""
 	if configureStep != dashboardConfigureInactive {
 		leftHint = "  Enter to continue · Ctrl-C to cancel"
 		if configureStep == dashboardConfigureModel && len(suggestions) > 0 {
@@ -2049,6 +2216,8 @@ func renderDashboardComposer(
 		}
 	} else if commandRunning {
 		leftHint = "  Ctrl-C to cancel the running command"
+	} else if recalling {
+		leftHint = "  ↑/↓ history · Enter to run · type to edit"
 	} else if len(suggestions) > 0 {
 		leftHint = fmt.Sprintf(
 			"  ↑/↓ choose %d/%d · Tab to fill · Enter to run · Ctrl-C exit",
@@ -2056,7 +2225,10 @@ func renderDashboardComposer(
 			len(suggestions),
 		)
 	}
-	rightHint := "omit pearl prefix  "
+	if leftHint == "" {
+		return composer.String()
+	}
+	rightHint := ""
 	if configureStep != dashboardConfigureInactive {
 		rightHint = "configure  "
 	}
@@ -2070,7 +2242,7 @@ func renderDashboardComposer(
 		))
 	} else {
 		fmt.Fprintln(&composer, dashboardPaint(
-			color, ansiDim, dashboardTruncate(leftHint+" · omit pearl", width),
+			color, ansiDim, dashboardTruncate(leftHint, width),
 		))
 	}
 	return composer.String()

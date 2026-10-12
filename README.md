@@ -69,7 +69,7 @@ tool activity.
 The same workflow works without the dashboard:
 
 ```bash
-pearl job -n "fix tests" "inspect this repository and fix the failing tests"
+pearl job "inspect this repository and fix the failing tests" -n "fix tests"
 pearl run "fix tests"
 pearl jobs
 ```
@@ -80,7 +80,7 @@ For a larger goal, start autonomous mode from the project directory:
 pearl autonomous "audit the release, fix the problems you find, and verify the result"
 ```
 
-Pearl opens a live TUI and keeps the coordinator in the daemon. Press `q` to
+Pearl opens a live TUI and keeps the coordinator in the daemon. Press Esc to
 detach. The session and its child jobs continue running.
 
 ### Build from source
@@ -122,12 +122,12 @@ and the Free Tier router remains available. Select a lab with Enter, then select
 its models with Enter to save it. Starred
 labs appear first in this order: Anthropic, OpenAI, Google, Grok, DeepSeek,
 Meta, Kimi, and GLM. Use the
-arrow keys, `j`/`k`, the mouse wheel or trackpad to navigate, and `/` to search
-the current menu. Long wheel swipes accelerate in both the model picker and
-jobs lists; short ticks move one row at a time. Left arrow returns to the labs,
-and Ctrl-U clears a search.
-Outside a search, `q` goes back or closes the lab menu; Ctrl-C closes the picker
-from either menu. The Pearl lab contains the Free Tier option, `openrouter/free`.
+arrow keys, `j`/`k`, the mouse wheel or trackpad to navigate, and type to search
+by model name. Searching from the labs menu lists matching models from every
+lab. Long wheel swipes accelerate in both the model picker and
+jobs lists; short ticks move one row at a time. Left arrow returns to the labs.
+Esc clears a search, then goes back or closes the lab menu; Ctrl-C closes the
+picker from either menu. The Pearl lab contains the Free Tier option, `openrouter/free`.
 Inside a lab, each row shows the model's readable name, sorted newest first by
 the date it was added to OpenRouter. Enter `model` in the
 dashboard to open the same picker. The catalog refreshes every time the command
@@ -140,25 +140,54 @@ Free Tier.
 Create a job from the directory Pearl should work in, then run it by ID:
 
 ```bash
-pearl job -n "fix tests" "inspect this repository and fix the tests"
+pearl job "inspect this repository and fix the tests" -n "fix tests"
 pearl run "fix tests"
 ```
 
 `pearl job` saves the prompt with a `pending` status and does not run it.
 `pearl run <job-id>` queues a pending job or retries a finished job, starts the
 background daemon when needed, and streams the result. Add `--detach` before
-the ID to run it in the background. Put `-n "name"` before the prompt to use
-that name as the job ID. Custom IDs can contain up to 20 characters and cannot
-begin with a hyphen.
+the ID to run it in the background.
 
-Add `--directory` or `-d` to choose another workspace with a native folder
-picker. Pearl validates the selection before saving the job. macOS uses the
+Without `-n`, Pearl gives the job a random two-word ID such as `jaunty-narwhal`.
+Add `-n "name"` after the prompt to use that name as the job ID instead. Custom
+IDs can contain up to 20 characters and cannot begin with a hyphen.
+
+Add `--directory` or `-d` after the prompt to choose another workspace with a
+native folder picker. Pearl validates the selection before saving the job. macOS uses the
 system folder dialog. Windows uses its PowerShell folder browser. Linux uses
 Zenity or KDialog when either is installed.
 
 ```bash
-pearl job --directory -n "fix docs" "update the documentation"
+pearl job "update the documentation" -n "fix docs" --directory
 ```
+
+## Harnesses
+
+A harness is the agent loop that does the work. Pearl ships its own, and it
+can also run jobs with the [Codex CLI](https://github.com/openai/codex). Both
+use the OpenRouter model and API key you set with `pearl model` and
+`pearl configure`.
+
+```bash
+pearl job "fix the failing tests" --harness codex
+pearl harness            # show the default harness
+pearl harness codex      # run new jobs with Codex by default
+pearl harness pearl      # switch back
+```
+
+Jobs created without `--harness` use the default when they start, and
+`pearl jobs view` shows which harness ran each job. Codex must be installed
+(`npm install -g @openai/codex`); set `PEARL_CODEX_PATH` if the daemon cannot
+find it.
+
+Codex jobs run in Codex's `workspace-write` sandbox: commands can change files
+in the job directory but have no network access. Pearl ignores your
+`~/.codex/config.toml` for these runs so its OpenRouter settings apply. A
+retried Codex job resumes its Codex session. Codex has no way to pause and ask
+a question, so `pearl respond` does not apply to Codex jobs. Codex also sends a
+much larger prompt with each request than Pearl's harness, which costs more on
+paid models. Autonomous mode always uses Pearl's harness for its own planning.
 
 The durable queue, schedules, and daemon lifecycle remain available as advanced
 operations:
@@ -166,7 +195,7 @@ operations:
 ```bash
 pearl
 pearl help
-pearl job -n "login fix" "fix the login flow"
+pearl job "fix the login flow" -n "login fix"
 pearl run --detach "login fix"
 pearl jobs
 pearl jobs view "login fix"
@@ -202,7 +231,7 @@ the normal job board, in run autocomplete, or in the daemon queue.
 
 The job report is split into expandable sections. Use the arrow keys to select
 a section, Enter or Space to expand it, `j` and `k` or Page Up and Page Down to
-scroll, `a` to expand everything, `c` to collapse everything, and `q` to exit.
+scroll, `a` to expand everything, `c` to collapse everything, and Esc to exit.
 Piped output remains plain text.
 
 `pearl status` shows the daemon state, queued count, and the IDs of every job
@@ -242,11 +271,11 @@ without the `pearl` prefix, such as `cancel <job-id>` or `respond <job-id>
 "answer"`. Run `jobs` to open the selectable job list inside the dashboard; it
 shows the current directory by default and `jobs --all` shows every workspace.
 Press `a` inside the list to toggle between them. Enter opens the selected
-job, Space preloads its run, retry, or response command, and `q` returns to the
+job, Space preloads its run, retry, or response command, and Esc returns to the
 list or dashboard. Type `archive` to browse archived jobs without leaving the
 dashboard. Enter `autonomous "goal"` to start an autonomous session, or enter
 `autonomous` to reopen the latest one. The autonomous screen updates in place.
-Press `q` to return to the main dashboard while the session keeps running. The
+Press Esc to return to the main dashboard while the session keeps running. The
 dashboard returns after other commands finish. Type
 `exit` or `quit`, or press `Ctrl-C`, to close it. Set `NO_COLOR=1` to disable
 colors.
@@ -274,7 +303,7 @@ judges the goal complete.
 The autonomous TUI lists every child job and keeps an activity feed built from
 the durable job status events. It records job creation and each transition such
 as `queued → running` and `running → completed`. The screen stays open after the
-session finishes until you press `q`.
+session finishes until you press Esc.
 
 Detaching does not stop the coordinator. Run `pearl autonomous` to reopen the
 latest session, or `pearl autonomous --resume <session-id>` to open a specific
@@ -481,7 +510,7 @@ retry resumes from the last complete checkpoint.
 Use an explicit path without opening a folder picker:
 
 ```bash
-pearl job --workspace /path/to/project -n "fix tests" "fix failing tests"
+pearl job "fix failing tests" -n "fix tests" --workspace /path/to/project
 pearl --workspace /path/to/project jobs --json
 pearl jobs view "fix tests" --json
 pearl status --json

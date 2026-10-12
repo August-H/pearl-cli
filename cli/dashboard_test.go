@@ -111,14 +111,14 @@ func TestDashboardJobsViewNavigatesAndUsesDashboardBackLabel(t *testing.T) {
 	screen := renderJobsListScreenWithQuitLabel([]store.Job{{
 		ID: "swift-delta", Status: store.JobCompleted, Prompt: "explain this folder",
 		CreatedAt: time.Now(),
-	}}, 80, 10, 0, 0, false, "q back")
-	for _, expected := range []string{"› swift-delta", "Enter view", "q back"} {
+	}}, 80, 10, 0, 0, false, "Esc back")
+	for _, expected := range []string{"› swift-delta", "Enter view", "Esc back"} {
 		if !strings.Contains(screen.Frame, expected) {
 			t.Fatalf("dashboard jobs list is missing %q:\n%s", expected, screen.Frame)
 		}
 	}
-	if strings.Contains(screen.Frame, "q exit") {
-		t.Fatalf("dashboard jobs list still says q exits:\n%s", screen.Frame)
+	if strings.Contains(screen.Frame, "Esc exit") {
+		t.Fatalf("dashboard jobs list still says Esc exits:\n%s", screen.Frame)
 	}
 }
 
@@ -341,12 +341,77 @@ func TestRenderDashboardShowsCommandPromptAndNotice(t *testing.T) {
 		"Omit the pearl prefix. Type the command directly.",
 	)
 	for _, expected := range []string{
-		"╭", "│ › respond job_123 \"use us west\"█",
-		"Omit the pearl prefix", "Enter to run", "omit pearl prefix",
+		"╭", "│ › respond job_123 \"use us west\"█", "Omit the pearl prefix",
 	} {
 		if !strings.Contains(output, expected) {
 			t.Fatalf("dashboard command prompt is missing %q:\n%s", expected, output)
 		}
+	}
+	for _, unwanted := range []string{"Enter to run · Ctrl-C to exit", "omit pearl prefix"} {
+		if strings.Contains(output, unwanted) {
+			t.Fatalf("dashboard still shows the idle hint %q:\n%s", unwanted, output)
+		}
+	}
+	idle := renderDashboardWithInput(
+		nil, time.Date(2026, time.August, 19, 12, 30, 0, 0, time.UTC), 80, false, nil, "", "",
+	)
+	if !strings.HasSuffix(strings.TrimRight(idle, "\n"), "╯") {
+		t.Fatalf("idle dashboard prompt does not end at the input box:\n%s", idle)
+	}
+}
+
+func TestDashboardHistoryRecallsSentCommandsNewestFirst(t *testing.T) {
+	var history dashboardHistory
+	if _, ok := history.previous(); ok {
+		t.Fatal("empty history recalled a command")
+	}
+	for _, command := range []string{"jobs", "  ", "model", "model", "run \"fix it\""} {
+		history.add(command)
+	}
+	for _, want := range []string{"run \"fix it\"", "model", "jobs", "jobs"} {
+		if got, ok := history.previous(); !ok || got != want {
+			t.Fatalf("previous = %q, %v; want %q", got, ok, want)
+		}
+	}
+	for _, want := range []string{"model", "run \"fix it\"", ""} {
+		if got, ok := history.next(); !ok || got != want {
+			t.Fatalf("next = %q, %v; want %q", got, ok, want)
+		}
+	}
+	if _, ok := history.next(); ok || history.browsing {
+		t.Fatal("next past the newest command kept browsing")
+	}
+	for index := range dashboardHistoryLimit + 5 {
+		history.add(fmt.Sprintf("command %d", index))
+	}
+	if len(history.entries) != dashboardHistoryLimit || history.entries[0] != "command 5" {
+		t.Fatalf("history kept %d entries starting at %q", len(history.entries), history.entries[0])
+	}
+}
+
+func TestRenderDashboardComposerShowsModelBelowInputBox(t *testing.T) {
+	for _, color := range []bool{false, true} {
+		output := renderDashboardComposer(nil, "", "", 80, color, 0, false,
+			dashboardConfigureInactive, false, "anthropic/claude-opus-5.5", 0, 0, 0, true)
+		lines := strings.Split(strings.TrimRight(output, "\n"), "\n")
+		last := lines[len(lines)-1]
+		if last != "  Current model: anthropic/claude-opus-5.5" || !strings.Contains(lines[len(lines)-2], "╯") {
+			t.Fatalf("color %v: model line is not plain text below the box:\n%q", color, lines)
+		}
+	}
+}
+
+func TestRenderDashboardComposerHidesSuggestionsWhileRecalling(t *testing.T) {
+	render := func(recalling bool) string {
+		return renderDashboardComposer(nil, "respond", "", 80, false, 0, false,
+			dashboardConfigureInactive, recalling, "", 0, 0, 0, true)
+	}
+	if browsing := render(false); !strings.Contains(browsing, "Answer a paused job") {
+		t.Fatalf("typed command is missing suggestions:\n%s", browsing)
+	}
+	recalled := render(true)
+	if strings.Contains(recalled, "Answer a paused job") || !strings.Contains(recalled, "↑/↓ history") {
+		t.Fatalf("recalled command shows suggestions or lacks the history hint:\n%s", recalled)
 	}
 }
 
@@ -386,11 +451,14 @@ func TestDashboardCommandSuggestionsFilterNavigateAndFill(t *testing.T) {
 		t.Fatalf("filling a detached run item returned %q", got)
 	}
 	jobItems := dashboardCommandSuggestions("job ")
-	if len(jobItems) != 2 || jobItems[0].usage != "[-n name] <prompt>" ||
-		jobItems[1].usage != "--directory [-n name] <prompt>" {
+	if len(jobItems) != 4 || jobItems[0].usage != "<prompt>" ||
+		jobItems[0].description != "Create a job in the current directory" ||
+		jobItems[1].usage != "<prompt> -n <name>" ||
+		jobItems[2].usage != "<prompt> [-n name] --directory" ||
+		jobItems[3].usage != "<prompt> --harness codex" {
 		t.Fatalf("dashboardCommandSuggestions(\"job \") = %#v", jobItems)
 	}
-	if got := dashboardFillSuggestion("job ", 1); got != "job --directory " {
+	if got := dashboardFillSuggestion("job ", 2); got != "job " {
 		t.Fatalf("filling the directory picker item returned %q", got)
 	}
 	daemonItems := dashboardCommandSuggestions("daemon re")
@@ -636,6 +704,79 @@ func TestRenderDashboardShowsCommandOutput(t *testing.T) {
 		if !strings.Contains(output, expected) {
 			t.Fatalf("dashboard command output is missing %q:\n%s", expected, output)
 		}
+	}
+}
+
+func TestDashboardCommandOutputWrapsTranscriptByWord(t *testing.T) {
+	output := renderDashboardCommandOutput(dashboardCommandView{
+		command: "run docs",
+		output:  "[assistant] the quick brown fox jumps over the lazy dog\n",
+	}, 20, false)
+	lines := strings.Split(strings.TrimSuffix(output, "\n"), "\n")[2:]
+	want := []string{"[assistant] the", "quick brown fox", "jumps over the lazy", "dog"}
+	if strings.Join(lines, "|") != strings.Join(want, "|") {
+		t.Fatalf("wrapped transcript = %q, want %q", lines, want)
+	}
+
+	table := renderDashboardCommandOutput(dashboardCommandView{
+		command: "jobs",
+		output:  "ID        STATUS   PROMPT that runs past the edge\n",
+	}, 20, false)
+	if !strings.Contains(table, "ID        STATUS ...") {
+		t.Fatalf("job table should stay on one line:\n%s", table)
+	}
+}
+
+func TestDashboardShowsThinkingUntilTheModelResponds(t *testing.T) {
+	render := func(command, output string, running bool) string {
+		return renderDashboardCommandOutput(dashboardCommandView{
+			command: command, output: output, running: running,
+		}, 60, false)
+	}
+	for _, test := range []struct {
+		command  string
+		output   string
+		running  bool
+		thinking bool
+	}{
+		{"run docs", "", true, true},
+		{"run docs", "Job: docs\n", true, true},
+		{"retry docs", "Job: docs\n", true, true},
+		{"respond docs yes", "Job: docs\n", true, true},
+		{"run docs", "Job: docs\n[reasoning]\nLooking", true, false},
+		{"run docs", "Job: docs\n[answer]\nDone", true, false},
+		{"run docs", "Job: docs\n[tool] read_file\n", true, false},
+		{"run docs", "Job: docs\n", false, false},
+		{"run --detach docs", "", true, false},
+		{"status", "", true, false},
+	} {
+		output := render(test.command, test.output, test.running)
+		if strings.Contains(output, "Thinking...") != test.thinking {
+			t.Fatalf("%q with output %q running=%v:\n%s",
+				test.command, test.output, test.running, output)
+		}
+	}
+	output := render("run docs", "Job: docs\n", true)
+	if !strings.HasSuffix(output, "Job: docs\nThinking...\n") {
+		t.Fatalf("Thinking should follow the job line:\n%s", output)
+	}
+}
+
+func TestDashboardPaintsTheModelLineBelowTheTranscript(t *testing.T) {
+	if got := attachModelLine([]string{"a/one:free"}); got != "[model] a/one:free" {
+		t.Fatalf("attachModelLine(one) = %q", got)
+	}
+	if got := attachModelLine([]string{"a/one:free", "b/two:free"}); got != "[models] a/one:free, b/two:free" {
+		t.Fatalf("attachModelLine(two) = %q", got)
+	}
+
+	output := renderDashboardCommandOutput(dashboardCommandView{
+		command: "run docs",
+		output:  "Job: docs\n[answer]\nDone.\n\n[model] a/one:free\n",
+	}, 60, true)
+	want := "Done.\n\n" + ansiBlue + "[model] a/one:free" + ansiReset + "\n"
+	if !strings.HasSuffix(output, want) {
+		t.Fatalf("model line should be blue after a blank line:\n%q", output)
 	}
 }
 
