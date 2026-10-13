@@ -174,3 +174,54 @@ func TestRunSendsPriorContextAndUserResponseAfterResume(t *testing.T) {
 		t.Fatalf("resumed request messages = %#v", received)
 	}
 }
+
+func TestRunContinuesAFinishedConversationWithAFollowUp(t *testing.T) {
+	transcript, _ := json.Marshal([]agentMessage{
+		{Role: "user", Content: "Write the docs"},
+		{Role: "assistant", Content: "Docs written."},
+	})
+	state := &userInputCheckpoint{transcript: transcript}
+	configDirectory := t.TempDir()
+	t.Setenv("PEARL_CONFIG_DIR", configDirectory)
+	t.Setenv("OPENROUTER_API_KEY", "test-key")
+	if err := os.WriteFile(filepath.Join(configDirectory, "settings.json"),
+		[]byte(`{"model":"test/model","max_depth":8}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var received []agentMessage
+	originalClient := sharedAgentHTTPClient
+	sharedAgentHTTPClient = &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		var payload struct {
+			Messages []agentMessage `json:"messages"`
+		}
+		if err := json.NewDecoder(request.Body).Decode(&payload); err != nil {
+			return nil, err
+		}
+		received = payload.Messages
+		return &http.Response{
+			StatusCode: http.StatusOK, Status: "200 OK", Header: make(http.Header),
+			Body: io.NopCloser(strings.NewReader(
+				"data: {\"choices\":[{\"delta\":{\"content\":\"Added examples.\"}}]}\n\ndata: [DONE]\n\n",
+			)),
+			Request: request,
+		}, nil
+	})}
+	t.Cleanup(func() { sharedAgentHTTPClient = originalClient })
+
+	saved := 0
+	result, err := Run(context.Background(), "Write the docs", RunOptions{
+		JobID: "job-1", WorkspaceRoot: t.TempDir(), State: state,
+		FollowUp:      "Add examples too",
+		FollowUpSaved: func() error { saved++; return nil },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result != "Added examples." || saved != 1 {
+		t.Fatalf("result = %q, saved = %d", result, saved)
+	}
+	if len(received) != 3 || received[1].Content != "Docs written." ||
+		received[2].Role != "user" || received[2].Content != "Add examples too" {
+		t.Fatalf("follow-up request messages = %#v", received)
+	}
+}

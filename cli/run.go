@@ -44,12 +44,13 @@ Usage:
   pearl configure                                          Set the API key and model
   pearl model [--list] [--set <model-id>] [--free]         Browse and set the model
   pearl harness [pearl|codex]                              Choose the default agent harness
+  pearl skills [list | path]                               Open the folder for skill files
   pearl jobs [--all]                                       List jobs for this directory
     view <job-id>                                           Show job details and transcript
   pearl archive [--all]                                    List archived jobs
   pearl dashboard                                          Watch and control active jobs
   pearl attach <job-id>                                    Stream a job's output
-  pearl respond <job-id> "answer"                          Answer a paused job and resume it
+  pearl respond <job-id> "answer"                          Answer a paused job or follow up on a finished one
   pearl cancel <job-id>                                    Cancel a job
   pearl retry <job-id>                                     Retry a finished job and stream its output
   pearl status                                             Show daemon and queue status
@@ -137,6 +138,8 @@ func Run(args []string) int {
 		return createJob(args[1:])
 	case "folder", "folders":
 		return runFolder(args[1:])
+	case "skills", "skill":
+		return runSkills(args[1:])
 	case "run":
 		return runJob(args[1:])
 	case "daemon":

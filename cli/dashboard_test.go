@@ -2,6 +2,7 @@ package cli
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -992,10 +993,15 @@ func TestDashboardRespondSuggestsPausedJobsAndTheirQuestions(t *testing.T) {
 		{ID: "fix tests", Status: store.JobWaitingInput, Question: "Run all tests?"},
 	}
 	items := dashboardCommandSuggestionsWithJobs("respond ", jobs)
-	if len(items) != 2 || items[0].usage != "quiet-otter" ||
+	if len(items) != 3 || items[0].usage != "quiet-otter" ||
 		items[0].completion != "respond quiet-otter " || items[0].description != "Asks: Which port?" ||
-		items[1].completion != `respond fix\ tests ` {
+		items[1].completion != `respond fix\ tests ` || items[2].usage != "quick-fox" ||
+		!strings.HasPrefix(items[2].description, "Follow up on completed job") {
 		t.Fatalf("respond suggestions = %#v", items)
+	}
+	if followUp := dashboardCommandSuggestionsWithJobs("respond quick-fox ", jobs); len(followUp) != 1 ||
+		followUp[0].usage != `"<follow-up>"` {
+		t.Fatalf("follow-up suggestions = %#v", followUp)
 	}
 	if got := dashboardFillSuggestionForStepWithJobs(
 		"respond qu", dashboardConfigureInactive, 0, jobs,
@@ -1011,12 +1017,58 @@ func TestDashboardRespondSuggestsPausedJobsAndTheirQuestions(t *testing.T) {
 	); got != "respond quiet-otter 80" {
 		t.Fatalf("Tab changed the answer to %q", got)
 	}
-	if none := dashboardCommandSuggestionsWithJobs("respond ", jobs[1:2]); len(none) != 1 ||
-		none[0].description != "No jobs are waiting for an answer" {
-		t.Fatalf("no paused jobs = %#v", none)
+	pending := []store.Job{{ID: "new-job", Status: store.JobPending}}
+	if none := dashboardCommandSuggestionsWithJobs("respond ", pending); len(none) != 1 ||
+		none[0].description != "No paused or finished jobs" {
+		t.Fatalf("no respondable jobs = %#v", none)
 	}
 	if missing := dashboardCommandSuggestionsWithJobs("respond zz", jobs); len(missing) != 0 {
 		t.Fatalf("unknown prefix = %#v", missing)
+	}
+}
+
+func TestDashboardJobIDCommandsSuggestTheJobsTheyAccept(t *testing.T) {
+	jobs := []store.Job{
+		{ID: "done-docs", Status: store.JobCompleted, Prompt: "write docs"},
+		{ID: "new-job", Status: store.JobPending},
+		{ID: "busy bee", Status: store.JobRunning},
+		{ID: "broke", Status: store.JobFailed},
+	}
+	usages := func(value string) []string {
+		var result []string
+		for _, item := range dashboardCommandSuggestionsWithJobs(value, jobs) {
+			result = append(result, item.usage)
+		}
+		return result
+	}
+	for value, want := range map[string][]string{
+		"attach ":  {"busy bee", "done-docs", "new-job", "broke"},
+		"cancel ":  {"busy bee", "new-job"},
+		"retry ":   {"done-docs", "broke"},
+		"retry b":  {"broke"},
+		"cancel b": {"busy bee"},
+	} {
+		if got := usages(value); !slices.Equal(got, want) {
+			t.Errorf("%q suggestions = %q, want %q", value, got, want)
+		}
+	}
+	if got := dashboardFillSuggestionForStepWithJobs(
+		"attach bu", dashboardConfigureInactive, 0, jobs,
+	); got != `attach busy\ bee` {
+		t.Fatalf("Tab filled %q", got)
+	}
+	if got := usages(`cancel busy\ `); !slices.Equal(got, []string{"busy bee"}) {
+		t.Fatalf("escaped space suggestions = %q", got)
+	}
+	if got := usages("retry broke "); len(got) != 0 {
+		t.Fatalf("suggestions after the ID = %q", got)
+	}
+	none := dashboardCommandSuggestionsWithJobs("retry ", jobs[1:3])
+	if len(none) != 1 || none[0].description != "No finished jobs to retry" {
+		t.Fatalf("no retryable jobs = %#v", none)
+	}
+	if !strings.HasPrefix(dashboardCommandSuggestionsWithJobs("attach d", jobs)[0].description, "completed") {
+		t.Fatal("attach suggestions should show the job status")
 	}
 }
 

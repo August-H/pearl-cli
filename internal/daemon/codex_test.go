@@ -123,7 +123,7 @@ func TestCodexRunnerUsesOpenRouterAndRecordsTheRun(t *testing.T) {
 	joined := strings.Join(arguments, " ")
 	for _, expected := range []string{
 		"exec --json", `model_provider="openrouter"`,
-		`model_providers.openrouter.base_url="https://openrouter.ai/api/v1"`,
+		`model_providers.openrouter.base_url="http://127.0.0.1:`,
 		`model_providers.openrouter.env_key="` + codexAPIKeyEnvironment + `"`,
 		`sandbox_mode="workspace-write"`, "-m openrouter/free",
 	} {

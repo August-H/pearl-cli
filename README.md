@@ -184,6 +184,34 @@ Moving a folder moves its jobs too, so pending and finished jobs run in the new
 directory next time. Running jobs and jobs waiting for an answer keep the
 directory they started in.
 
+## Skills
+
+A skill is a Markdown file of instructions for one kind of task, such as how
+you like commits written or how to ship a release. Every job can use your
+skills, with either harness.
+
+```bash
+pearl skills          # open the skills folder and list your skills
+pearl skills list     # list them without opening the folder
+pearl skills path     # print the folder path
+```
+
+Save each skill as `<name>.md` or `<name>/SKILL.md` in that folder. Front
+matter is optional:
+
+```markdown
+---
+name: ship-release
+description: Tag, build, and publish a release
+---
+1. Run the tests...
+```
+
+Without front matter, the file or folder name is the skill name and the first
+line of text is its description. Jobs see each skill's name and description
+and load the full text only when a skill fits the task. Changes apply to the
+next job that starts.
+
 ## Harnesses
 
 A harness is the agent loop that does the work. Pearl ships its own, and it
@@ -299,7 +327,9 @@ The Makefile embeds the same version, commit, and date locally via
 `pearl dashboard` opens a live terminal view of running, queued, and
 `waiting_input` jobs from every workspace. Type any Pearl command at the prompt
 without the `pearl` prefix, such as `cancel <job-id>` or `respond <job-id>
-"answer"`. Run `jobs` to open the selectable job list inside the dashboard; it
+"answer"`. Commands that take a job ID, such as `run`, `attach`, `respond`,
+`cancel`, `retry`, and `jobs view`, list matching jobs as you type; press Tab
+to fill one in. Run `jobs` to open the selectable job list inside the dashboard; it
 shows the current directory by default and `jobs --all` shows every workspace.
 Press `a` inside the list to toggle between them. Enter opens the selected
 job, Space preloads its run, retry, or response command, and Esc returns to the
@@ -322,6 +352,10 @@ pearl respond <job-id> "your answer"
 The response is added to the saved agent transcript, so the resumed run keeps
 the messages and completed tool calls from before the question. A waiting job
 does not occupy the worker; other queued jobs can continue in the meantime.
+
+`pearl respond` also works on completed, failed, interrupted, and cancelled
+jobs. The message is queued as a follow-up: Pearl jobs continue the saved
+conversation, and Codex jobs resume their Codex session.
 
 ## Autonomous mode
 
