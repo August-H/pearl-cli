@@ -1,6 +1,7 @@
 #!/bin/sh
 # Pearl CLI installer: downloads the latest release binary for this platform,
 # verifies its SHA-256 checksum, and installs it into a user-owned bin dir.
+# It then installs Pearl's own copy of Codex for the Codex harness.
 #
 # Usage:
 #   curl -fsSL https://raw.githubusercontent.com/August-H/pearl-cli/main/install.sh | sh
@@ -8,6 +9,7 @@
 # Optional environment overrides (useful for mirrors and testing):
 #   PEARL_INSTALL_DIR   target directory (default: ~/.local/bin)
 #   PEARL_DOWNLOAD_BASE asset base URL
+#   PEARL_SKIP_CODEX    set to 1 to skip installing Codex
 set -eu
 
 REPO="August-H/pearl-cli"
@@ -71,6 +73,13 @@ chmod 755 "$TEMP_DIR/pearl"
 mv -f "$TEMP_DIR/pearl" "$INSTALL_DIR/pearl"
 
 VERSION="$("$INSTALL_DIR/pearl" version 2>/dev/null | head -n 1 | cut -d' ' -f3 || true)"
+
+if [ "${PEARL_SKIP_CODEX:-}" = "1" ]; then
+    echo "Skipping Codex (PEARL_SKIP_CODEX=1)."
+elif ! "$INSTALL_DIR/pearl" codex install; then
+    echo "Pearl is installed, but Codex could not be installed." >&2
+    echo "Run \"pearl codex install\" later to use the Codex harness." >&2
+fi
 
 case ":$PATH:" in
     *":$INSTALL_DIR:"*) ;;

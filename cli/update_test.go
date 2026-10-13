@@ -190,6 +190,10 @@ func TestInstallLatestReleaseDownloadsVerifiesAndApplies(t *testing.T) {
 		return nil
 	}
 	defer func() { applyUpdate = previousApply }()
+	codexUpdated := false
+	previousCodexUpdate := updateManagedCodex
+	updateManagedCodex = func() { codexUpdated = true }
+	defer func() { updateManagedCodex = previousCodexUpdate }()
 
 	previousVersion := version
 	version = "0.0.1"
@@ -200,6 +204,9 @@ func TestInstallLatestReleaseDownloadsVerifiesAndApplies(t *testing.T) {
 	})
 	if code != 0 {
 		t.Fatalf("installLatestRelease exited %d, stderr=%q", code, stderr)
+	}
+	if !codexUpdated {
+		t.Fatal("a successful update did not refresh Pearl's Codex copy")
 	}
 	if !strings.Contains(stdout, "Updated to v99.0.0") {
 		t.Fatalf("stdout missing success line: %q", stdout)

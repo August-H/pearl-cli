@@ -45,26 +45,11 @@ func (b *boundedCommandOutput) Write(data []byte) (int, error) {
 // Read command permissions only from durable user configuration. A repository's
 // settings.json cannot opt itself into executing commands.
 func allowedCommands() ([]string, error) {
-	for _, path := range pearlConfigFiles("settings.json", false) {
-		data, err := os.ReadFile(path)
-		if os.IsNotExist(err) {
-			continue
-		}
-		if err != nil {
-			return nil, err
-		}
-		var settings struct {
-			AllowedCommands []string `json:"allowed_commands"`
-		}
-		if err := json.Unmarshal(data, &settings); err != nil {
-			return nil, err
-		}
-		return settings.AllowedCommands, nil
-	}
-	return nil, nil
+	policy, err := loadCommandPolicy()
+	return policy.AllowedCommands, err
 }
 
-func runWorkspaceCommand(ctx context.Context, call agentToolCall, root string) agentToolResult {
+func runWorkspaceCommand(ctx context.Context, call agentToolCall, root string, access *outsideAccess) agentToolResult {
 	fail := func(err error) agentToolResult { return agentToolResult{Error: err.Error()} }
 	var input struct {
 		Command        string   `json:"command"`
@@ -75,12 +60,12 @@ func runWorkspaceCommand(ctx context.Context, call agentToolCall, root string) a
 	if err := json.Unmarshal([]byte(call.Function.Arguments), &input); err != nil {
 		return fail(err)
 	}
-	allowed, err := allowedCommands()
+	policy, err := loadCommandPolicy()
 	if err != nil {
 		return fail(err)
 	}
 	found := false
-	for _, command := range allowed {
+	for _, command := range policy.AllowedCommands {
 		if command == input.Command && command != "" {
 			found = true
 			break
@@ -112,6 +97,13 @@ func runWorkspaceCommand(ctx context.Context, call agentToolCall, root string) a
 	if err != nil {
 		return fail(err)
 	}
+	program, arguments := executable, input.Args
+	sandbox := newCommandSandbox(root, access.writableRoots(), policy.AllowNetwork)
+	if wrapped, wrappedArguments, err := sandbox.wrap(executable, input.Args, directory); err == nil {
+		program, arguments = wrapped, wrappedArguments
+	} else if !errors.Is(err, errNoSandbox) || !policy.AllowUnsandboxed {
+		return fail(err)
+	}
 	if input.TimeoutSeconds <= 0 {
 		input.TimeoutSeconds = 60
 	}
@@ -120,7 +112,7 @@ func runWorkspaceCommand(ctx context.Context, call agentToolCall, root string) a
 	}
 	ctx, cancel := context.WithTimeout(ctx, time.Duration(input.TimeoutSeconds)*time.Second)
 	defer cancel()
-	result, err := executeWorkspaceCommand(ctx, executable, input.Args, directory)
+	result, err := executeWorkspaceCommand(ctx, program, arguments, directory)
 	if err != nil {
 		return fail(err)
 	}

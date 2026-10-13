@@ -44,6 +44,7 @@ Usage:
   pearl configure                                          Set the API key and model
   pearl model [--list] [--set <model-id>] [--free]         Browse and set the model
   pearl harness [pearl|codex]                              Choose the default agent harness
+  pearl codex [install]                                    Check or install Pearl's copy of Codex
   pearl skills [list | path]                               Open the folder for skill files
   pearl jobs [--all]                                       List jobs for this directory
     view <job-id>                                           Show job details and transcript
@@ -140,6 +141,8 @@ func Run(args []string) int {
 		return runFolder(args[1:])
 	case "skills", "skill":
 		return runSkills(args[1:])
+	case "codex":
+		return runCodex(args[1:])
 	case "run":
 		return runJob(args[1:])
 	case "daemon":
@@ -645,6 +648,12 @@ func attachWithClientAfter(client *daemonClient, jobID string, after int64) int 
 				currentSection = ""
 			}
 			fmt.Printf("[context] %s\n", event.Data)
+		case "review":
+			if currentSection != "" {
+				fmt.Println()
+				currentSection = ""
+			}
+			fmt.Printf("[review] %s\n", event.Data)
 		case "model":
 			if model := strings.TrimSpace(event.Data); model != "" && !slices.Contains(models, model) {
 				models = append(models, model)

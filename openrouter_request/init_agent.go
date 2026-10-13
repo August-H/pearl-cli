@@ -14,7 +14,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/August-H/pearl-cli/agent_functions"
 	"github.com/August-H/pearl-cli/internal/workspacepath"
 )
 
@@ -143,6 +142,8 @@ type RunOptions struct {
 	FollowUp string
 	// FollowUpSaved runs once FollowUp is part of the saved transcript.
 	FollowUpSaved func() error
+
+	access *outsideAccess
 }
 
 // Tool adds a function that the model can call during a run. Parameters must
@@ -246,6 +247,9 @@ func Run(ctx context.Context, prompt string, options RunOptions) (string, error)
 	if err := validateApprovedWorkspace(workspaceRoot, settings.Approved_workspace_roots); err != nil {
 		return "", err
 	}
+	if err := workspacepath.CheckJobDirectory(workspaceRoot); err != nil {
+		return "", err
+	}
 
 	maxFileBytes := options.MaxFileBytes
 	if maxFileBytes <= 0 {
@@ -309,6 +313,16 @@ func Run(ctx context.Context, prompt string, options RunOptions) (string, error)
 	}
 	if !loadedTranscript {
 		followUp = ""
+	}
+	if !options.OnlyTools {
+		options.access = newOutsideAccess(
+			outsideAccessTask(transcriptMessages, followUp),
+			workspacepath.CanonicalPath(workspaceRoot),
+			transcriptMessages,
+			func(ctx context.Context, task string, request outsideRequest) (outsideDecision, error) {
+				return reviewOutsideAccess(ctx, apiKey, settings.Model, task, request)
+			},
+		)
 	}
 	if loadedTranscript && followUp == "" && len(transcriptMessages) > 0 {
 		lastMessage := transcriptMessages[len(transcriptMessages)-1]
@@ -897,7 +911,7 @@ func newAgentTool(
 func allowedAgentTools() []map[string]any {
 	path := map[string]any{
 		"type":        "string",
-		"description": "Path relative to the current project root",
+		"description": agentPathDescription,
 	}
 
 	return []map[string]any{
@@ -951,6 +965,7 @@ func agentTools(options RunOptions) []map[string]any {
 	if !options.OnlyTools {
 		tools = append(tools, allowedAgentTools()...)
 		tools = append(tools, workspaceToolDefinitions()...)
+		tools = append(tools, requestOutsideAccessToolDefinition())
 		if skills, err := LoadSkills(); err == nil && len(skills) > 0 {
 			tools = append(tools, readSkillToolDefinition())
 		}
@@ -995,6 +1010,9 @@ func executeAgentTool(
 			return agentMessage{}, fmt.Errorf("load tool result: %w", err)
 		}
 		if found {
+			if call.Function.Name == requestOutsideAccessTool {
+				options.access.remember(cached)
+			}
 			if options.Events != nil {
 				if err := options.Events(AgentEvent{Type: "tool_cached", Data: call.Function.Name}); err != nil {
 					return agentMessage{}, fmt.Errorf("emit cached tool event: %w", err)
@@ -1011,6 +1029,12 @@ func executeAgentTool(
 			return agentMessage{}, err
 		}
 		result = resolved
+	} else if call.Function.Name == requestOutsideAccessTool && !options.OnlyTools {
+		resolved, err := options.access.handle(ctx, call, options)
+		if err != nil {
+			return agentMessage{}, err
+		}
+		result = resolved
 	} else if custom, found := customAgentTool(options.Tools, call.Function.Name); found {
 		value, err := custom.Execute(ctx, json.RawMessage(call.Function.Arguments))
 		if err != nil {
@@ -1023,9 +1047,9 @@ func executeAgentTool(
 	} else if call.Function.Name == readSkillTool {
 		result = runReadSkillTool(ctx, call)
 	} else if call.Function.Name == "run_command" {
-		result = runWorkspaceCommand(ctx, call, workspaceRoot)
+		result = runWorkspaceCommand(ctx, call, workspaceRoot, options.access)
 	} else {
-		result = runAgentToolContext(ctx, call, workspaceRoot, maxFileBytes)
+		result = runFileTool(ctx, call, workspaceRoot, maxFileBytes, options.access)
 	}
 	content, err := json.Marshal(result)
 	if err != nil {
@@ -1106,87 +1130,7 @@ func toolResultMessage(call agentToolCall, content []byte) agentMessage {
 }
 
 func runAgentTool(call agentToolCall, workspaceRoot string, maxFileBytes int64) agentToolResult {
-	return runAgentToolContext(context.Background(), call, workspaceRoot, maxFileBytes)
-}
-
-func runAgentToolContext(ctx context.Context, call agentToolCall, workspaceRoot string, maxFileBytes int64) agentToolResult {
-	switch call.Function.Name {
-	case "view_file_tree", "list_files", "search_files", "create_directory", "apply_patch":
-		return extendedWorkspaceTool(ctx, call, workspaceRoot, maxFileBytes)
-	}
-	type pathArguments struct {
-		RelativePath string `json:"relative_path"`
-	}
-	type writeArguments struct {
-		RelativePath string `json:"relative_path"`
-		Content      string `json:"content"`
-	}
-
-	fail := func(err error) agentToolResult {
-		return agentToolResult{Error: err.Error()}
-	}
-
-	switch call.Function.Name {
-	case "read_file_contents":
-		var arguments pathArguments
-		if err := json.Unmarshal([]byte(call.Function.Arguments), &arguments); err != nil {
-			return fail(fmt.Errorf("decode arguments: %w", err))
-		}
-		path, err := safeAgentPath(workspaceRoot, arguments.RelativePath)
-		if err != nil {
-			return fail(err)
-		}
-		fileInfo, err := os.Stat(path)
-		if err != nil {
-			return fail(err)
-		}
-		if fileInfo.Size() > maxFileBytes {
-			return fail(fmt.Errorf("file is %d bytes; maximum readable size is %d", fileInfo.Size(), maxFileBytes))
-		}
-		result, err := agent_functions.ReadLimitedFile(path, maxFileBytes)
-		if err != nil {
-			return fail(err)
-		}
-		return agentToolResult{Success: true, Result: result}
-
-	case "create_file":
-		var arguments pathArguments
-		if err := json.Unmarshal([]byte(call.Function.Arguments), &arguments); err != nil {
-			return fail(fmt.Errorf("decode arguments: %w", err))
-		}
-		path, err := safeAgentPath(workspaceRoot, arguments.RelativePath)
-		if err != nil {
-			return fail(err)
-		}
-		result, err := agent_functions.Create_file(path)
-		if err != nil {
-			return fail(err)
-		}
-		return agentToolResult{Success: true, Result: result}
-
-	case "write_to_file":
-		var arguments writeArguments
-		if err := json.Unmarshal([]byte(call.Function.Arguments), &arguments); err != nil {
-			return fail(fmt.Errorf("decode arguments: %w", err))
-		}
-		path, err := safeAgentPath(workspaceRoot, arguments.RelativePath)
-		if err != nil {
-			return fail(err)
-		}
-		if int64(len(arguments.Content)) > maxFileBytes {
-			return fail(fmt.Errorf("content is %d bytes; maximum writable size is %d", len(arguments.Content), maxFileBytes))
-		}
-		if err := agent_functions.Write_ToFile(path, arguments.Content); err != nil {
-			return fail(err)
-		}
-		return agentToolResult{
-			Success: true,
-			Result:  "Successfully wrote file at: " + path,
-		}
-
-	default:
-		return fail(fmt.Errorf("tool %q is not allowed", call.Function.Name))
-	}
+	return runFileTool(context.Background(), call, workspaceRoot, maxFileBytes, nil)
 }
 
 func safeAgentPath(workspaceRoot, relativePath string) (string, error) {

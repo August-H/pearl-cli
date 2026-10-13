@@ -3,12 +3,16 @@ package openrouter_request
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/August-H/pearl-cli/internal/workspacepath"
 )
 
 func workspaceCall(name string, args any) agentToolCall {
@@ -54,6 +58,18 @@ func TestCommandHelper(t *testing.T) {
 		os.Exit(0)
 	case "fail":
 		os.Exit(17)
+	case "escape":
+		status := func(err error) string {
+			if err != nil {
+				return "denied"
+			}
+			return "ok"
+		}
+		_, readErr := os.ReadFile(os.Getenv("PEARL_ESCAPE_READ"))
+		writeErr := os.WriteFile(os.Getenv("PEARL_ESCAPE_WRITE"), []byte("escaped"), 0o600)
+		insideErr := os.WriteFile("inside.txt", []byte("inside"), 0o600)
+		os.Stdout.WriteString("read:" + status(readErr) + " write:" + status(writeErr) + " inside:" + status(insideErr))
+		os.Exit(0)
 	case "sleep":
 		time.Sleep(10 * time.Second)
 		os.Exit(0)
@@ -124,21 +140,25 @@ func TestCommandsEnforcePolicyAndBoundExecution(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	settings, _ := json.Marshal(map[string]any{"model": "dummy", "allowed_commands": []string{executable}})
+	// macOS always has a sandbox; elsewhere CI may not, so allow the fallback there.
+	settings, _ := json.Marshal(map[string]any{
+		"model": "dummy", "allowed_commands": []string{executable},
+		"allow_unsandboxed_commands": runtime.GOOS != "darwin",
+	})
 	if err := os.WriteFile(filepath.Join(config, "settings.json"), settings, 0o600); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("PEARL_COMMAND_TEST_HELPER", "1")
 	t.Setenv("GORACE", "atexit_sleep_ms=0")
 	call := workspaceCall("run_command", map[string]any{"command": "unapproved", "args": []string{}})
-	if result := runWorkspaceCommand(context.Background(), call, root); result.Success || !strings.Contains(result.Error, "not enabled") {
+	if result := runWorkspaceCommand(context.Background(), call, root, nil); result.Success || !strings.Contains(result.Error, "not enabled") {
 		t.Fatalf("policy result=%+v", result)
 	}
 	for _, mode := range []string{"output", "fail", "sleep"} {
 		t.Run(mode, func(t *testing.T) {
 			call = workspaceCall("run_command", map[string]any{"command": executable, "args": []string{"-test.run=^TestCommandHelper$", "--", mode}, "timeout_seconds": 1})
 			start := time.Now()
-			result := runWorkspaceCommand(context.Background(), call, root)
+			result := runWorkspaceCommand(context.Background(), call, root, nil)
 			if result.Error != "" {
 				t.Fatal(result.Error)
 			}
@@ -160,7 +180,47 @@ func TestCommandsEnforcePolicyAndBoundExecution(t *testing.T) {
 		})
 	}
 	call = workspaceCall("run_command", map[string]any{"command": executable, "relative_path": "../outside", "args": []string{}})
-	if result := runWorkspaceCommand(context.Background(), call, root); result.Error == "" {
+	if result := runWorkspaceCommand(context.Background(), call, root, nil); result.Error == "" {
 		t.Fatal("workspace escape accepted")
+	}
+}
+
+func TestSandboxKeepsCommandsInTheWorkspace(t *testing.T) {
+	base := workspacepath.CanonicalPath(t.TempDir())
+	workspace, outside, secret := filepath.Join(base, "workspace"), filepath.Join(base, "outside"), filepath.Join(base, "secret")
+	for _, directory := range []string{workspace, outside, secret} {
+		if err := os.Mkdir(directory, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(secret, "key.txt"), []byte("hunter2"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	sandbox := commandSandbox{Writable: []string{workspace}, Denied: []string{secret}}
+	program, arguments, err := sandbox.wrap(executable, []string{"-test.run=^TestCommandHelper$", "--", "escape"}, workspace)
+	if errors.Is(err, errNoSandbox) {
+		t.Skip("no command sandbox on this system")
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PEARL_COMMAND_TEST_HELPER", "1")
+	t.Setenv("PEARL_ESCAPE_READ", filepath.Join(secret, "key.txt"))
+	t.Setenv("PEARL_ESCAPE_WRITE", filepath.Join(outside, "escaped.txt"))
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	result, err := executeWorkspaceCommand(ctx, program, arguments, workspace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(result.Output, "read:denied write:denied inside:ok") {
+		t.Fatalf("sandboxed command output = %q (exit %d)", result.Output, result.ExitCode)
+	}
+	if _, err := os.Stat(filepath.Join(outside, "escaped.txt")); err == nil {
+		t.Fatal("sandboxed command wrote outside the workspace")
 	}
 }

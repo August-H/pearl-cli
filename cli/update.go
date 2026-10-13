@@ -10,12 +10,14 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/August-H/pearl-cli/internal/codexinstall"
 	"github.com/fynelabs/selfupdate"
 )
 
@@ -144,7 +146,25 @@ func installLatestRelease(force bool) int {
 		fmt.Printf("Updated to %s; previous binary saved as %s\n",
 			release.TagName, filepath.Base(oldPath))
 	}
+	updateManagedCodex()
 	return restartDaemonAfterUpdate()
+}
+
+// updateManagedCodex asks the new binary to install the Codex version it pins,
+// when Pearl manages a copy of Codex. A failure leaves the old copy in place.
+var updateManagedCodex = func() {
+	if !codexinstall.Managed() {
+		return
+	}
+	executable, err := os.Executable()
+	if err != nil {
+		return
+	}
+	command := exec.Command(executable, "codex", "install")
+	command.Stdout, command.Stderr = os.Stdout, os.Stderr
+	if err := command.Run(); err != nil {
+		fmt.Fprintln(os.Stderr, "Could not update Codex; run \"pearl codex install\" to try again.")
+	}
 }
 
 // restartDaemonAfterUpdate swaps the running daemon onto the new binary only

@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -854,11 +855,7 @@ func TestStatusListsWaitingJobsFromEveryWorkspace(t *testing.T) {
 
 func startTestDaemon(t *testing.T, runner daemon.AgentRunner) *daemonClient {
 	t.Helper()
-	configDirectory, err := os.MkdirTemp("/tmp", "pearl-cli-test-")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.RemoveAll(configDirectory) })
+	configDirectory := socketTempDir(t, "pearl-cli-test-")
 	t.Setenv("PEARL_CONFIG_DIR", configDirectory)
 	paths, err := pearlpaths.Resolve()
 	if err != nil {
@@ -959,4 +956,20 @@ func captureTestStderr(t *testing.T, run func() int) (string, int) {
 		t.Fatal(err)
 	}
 	return string(output), exitCode
+}
+
+// socketTempDir makes a temp folder for a daemon socket. Unix socket paths are
+// limited to about 104 bytes, and macOS's default temp folder is too long.
+func socketTempDir(t *testing.T, prefix string) string {
+	t.Helper()
+	parent := "/tmp"
+	if runtime.GOOS == "windows" {
+		parent = ""
+	}
+	directory, err := os.MkdirTemp(parent, prefix)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(directory) })
+	return directory
 }

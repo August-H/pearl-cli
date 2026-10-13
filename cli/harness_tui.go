@@ -33,7 +33,7 @@ func availableHarnesses() []harnessOption {
 		description: "OpenAI's Codex CLI, using your OpenRouter model",
 	}
 	if _, err := daemon.FindCodex(); err != nil {
-		codex.unavailable = "not installed: npm install -g @openai/codex"
+		codex.unavailable = "not installed: run pearl codex install"
 	}
 	return []harnessOption{{
 		name: store.HarnessPearl, label: "Pearl",
