@@ -5,8 +5,10 @@ $smokeRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('pearl-smoke-' + [guid
 $previousConfig = $env:PEARL_CONFIG_DIR
 $previousSocket = $env:PEARL_SOCKET
 $previousColor = $env:NO_COLOR
-New-Item -ItemType Directory -Path $smokeRoot | Out-Null
-$env:PEARL_CONFIG_DIR = $smokeRoot
+$configRoot = Join-Path $smokeRoot 'config'
+$workspace = Join-Path $smokeRoot 'workspace'
+New-Item -ItemType Directory -Path $configRoot, $workspace | Out-Null
+$env:PEARL_CONFIG_DIR = $configRoot
 $env:PEARL_SOCKET = Join-Path $smokeRoot 'p.sock'
 $env:NO_COLOR = '1'
 function Invoke-Pearl {
@@ -16,12 +18,12 @@ function Invoke-Pearl {
     return $output
 }
 try {
-    'OPENROUTER_API_KEY=dummy-smoke-key' | Set-Content -LiteralPath (Join-Path $smokeRoot '.env')
+    'OPENROUTER_API_KEY=dummy-smoke-key' | Set-Content -LiteralPath (Join-Path $configRoot '.env')
     Invoke-Pearl version
     Invoke-Pearl daemon --help
     Invoke-Pearl daemon start
-    Invoke-Pearl job --workspace $smokeRoot -n 'smoke job' 'Synthetic pending job; never execute'
-    $jobs = Invoke-Pearl --workspace $smokeRoot jobs --json | ConvertFrom-Json
+    Invoke-Pearl job --workspace $workspace -n 'smoke job' 'Synthetic pending job; never execute'
+    $jobs = Invoke-Pearl --workspace $workspace jobs --json | ConvertFrom-Json
     if (@($jobs).Count -ne 1 -or $jobs[0].status -ne 'pending') { throw 'Pending job missing from JSON output' }
     $details = Invoke-Pearl jobs view 'smoke job' --json | ConvertFrom-Json
     if ($details.job.id -ne 'smoke job') { throw 'Job details mismatch' }
