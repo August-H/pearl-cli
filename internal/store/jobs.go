@@ -529,7 +529,11 @@ func (s *Store) RetryJob(ctx context.Context, id string) (Job, int64, error) {
 	defer transaction.Rollback()
 	_, err = transaction.ExecContext(ctx, `
 UPDATE jobs SET status = ?, error = '', result = '', cancel_requested = 0,
-started_at = NULL, finished_at = NULL WHERE id = ? AND archived_at IS NULL`, JobQueued, id)
+started_at = NULL, finished_at = NULL,
+input_response = CASE WHEN input_tool_call_id LIKE ? THEN '' ELSE input_response END,
+input_tool_call_id = CASE WHEN input_tool_call_id LIKE ? THEN '' ELSE input_tool_call_id END
+WHERE id = ? AND archived_at IS NULL`,
+		JobQueued, FollowUpIDPrefix+"%", FollowUpIDPrefix+"%", id)
 	var retrySequence int64
 	if err == nil {
 		retrySequence, err = appendEventTx(ctx, transaction, id, "status", JobQueued)
@@ -616,10 +620,15 @@ func (s *Store) RespondToJob(ctx context.Context, id, response string) (Job, int
 	if err := rejectArchivedJob(job); err != nil {
 		return Job{}, 0, err
 	}
-	if job.Status != JobWaitingInput {
+	switch job.Status {
+	case JobCompleted, JobFailed, JobInterrupted, JobCancelled:
+		return followUpJob(ctx, transaction, job, response)
+	case JobWaitingInput:
+	case JobPending:
+		return Job{}, 0, fmt.Errorf("job %q has not run yet; start it with pearl run", id)
+	default:
 		return Job{}, 0, fmt.Errorf(
-			"job %q is %s, not waiting for an answer; only paused jobs take answers",
-			id, job.Status,
+			"job %q is %s; respond once it pauses for an answer or finishes", id, job.Status,
 		)
 	}
 	if job.InputToolCallID == "" {
@@ -657,6 +666,55 @@ WHERE id = ? AND status = ? AND archived_at IS NULL`, JobQueued, response, id, J
 	job.StartedAt = nil
 	job.FinishedAt = nil
 	return job, sequence, nil
+}
+
+// FollowUpIDPrefix marks an input ID that holds a follow-up message for a
+// finished job rather than the answer to a question.
+const FollowUpIDPrefix = "followup-"
+
+// followUpJob queues a finished job to continue its conversation with message.
+func followUpJob(ctx context.Context, transaction *sql.Tx, job Job, message string) (Job, int64, error) {
+	followUpID := fmt.Sprintf("%s%d", FollowUpIDPrefix, time.Now().UnixNano())
+	result, err := transaction.ExecContext(ctx, `
+UPDATE jobs SET status = ?, input_question = '', input_tool_call_id = ?,
+input_response = ?, result = '', error = '', cancel_requested = 0,
+started_at = NULL, finished_at = NULL
+WHERE id = ? AND status = ? AND archived_at IS NULL`,
+		JobQueued, followUpID, message, job.ID, job.Status)
+	if err != nil {
+		return Job{}, 0, err
+	}
+	if affected, err := result.RowsAffected(); err != nil || affected != 1 {
+		if err == nil {
+			err = fmt.Errorf("job %q changed before the follow-up was saved", job.ID)
+		}
+		return Job{}, 0, err
+	}
+	if _, err := appendEventTx(ctx, transaction, job.ID, "user_input", message); err != nil {
+		return Job{}, 0, err
+	}
+	sequence, err := appendEventTx(ctx, transaction, job.ID, "status", JobQueued)
+	if err != nil {
+		return Job{}, 0, err
+	}
+	if err := transaction.Commit(); err != nil {
+		return Job{}, 0, err
+	}
+	job.Status = JobQueued
+	job.Question, job.Result, job.Error = "", "", ""
+	job.InputToolCallID, job.InputResponse = followUpID, message
+	job.CancelRequested = false
+	job.StartedAt, job.FinishedAt = nil, nil
+	return job, sequence, nil
+}
+
+// ConsumeFollowUp clears a follow-up once the agent has recorded it, so a later
+// retry does not send it again.
+func (s *Store) ConsumeFollowUp(ctx context.Context, jobID, followUpID string) error {
+	_, err := s.db.ExecContext(ctx, `
+UPDATE jobs SET input_tool_call_id = '', input_response = ''
+WHERE id = ? AND input_tool_call_id = ?`, jobID, followUpID)
+	return err
 }
 
 func (s *Store) LoadUserInputResponse(

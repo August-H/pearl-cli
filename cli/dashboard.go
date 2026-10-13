@@ -187,10 +187,12 @@ var dashboardCommandOptions = []dashboardCommandSuggestion{
 	{usage: "folder create <name>", completion: "folder create ", description: "Create a folder for this directory"},
 	{usage: "folder edit <name>", completion: "folder edit ", description: "Change a folder's directory"},
 	{usage: "folder remove <name>", completion: "folder remove ", description: "Remove a folder and keep its jobs"},
+	{usage: "skills", completion: "skills", description: "Open the skills folder"},
+	{usage: "skills list", completion: "skills list", description: "List saved skills"},
 	{usage: "status", completion: "status", description: "Show daemon and queue status"},
 	{usage: "update", completion: "update", description: "Update Pearl to the latest release"},
 	{usage: "attach <job-id>", completion: "attach ", description: "Stream a job's output"},
-	{usage: "respond <job-id> \"<answer>\"", completion: "respond ", description: "Answer a paused job"},
+	{usage: "respond <job-id> \"<answer>\"", completion: "respond ", description: "Answer a paused job or follow up on a finished one"},
 	{usage: "cancel <job-id>", completion: "cancel ", description: "Cancel a job"},
 	{usage: "retry <job-id>", completion: "retry ", description: "Retry a finished job"},
 	{usage: "schedule list", completion: "schedule list", description: "List recurring jobs"},
@@ -221,10 +223,11 @@ var dashboardCommandDescriptions = map[string]string{
 	"autonomous": "Open or start autonomous mode",
 	"job":        "Create a job",
 	"folder":     "Manage job folders",
+	"skills":     "Open the skills folder",
 	"status":     "Show daemon and queue status",
 	"update":     "Update Pearl to the latest release",
 	"attach":     "Stream a job's output",
-	"respond":    "Answer a paused job",
+	"respond":    "Answer a paused job or follow up on a finished one",
 	"cancel":     "Cancel a job",
 	"retry":      "Retry a finished job",
 	"schedule":   "Manage recurring jobs",
@@ -1588,6 +1591,9 @@ func dashboardCommandSuggestionsInternal(
 	if useJobIDs && command == "respond" {
 		return dashboardRespondCommandSuggestions(remainder, trailingSpace, jobs)
 	}
+	if picker, found := dashboardJobPickers[command]; useJobIDs && found {
+		return dashboardJobIDSuggestions(command, remainder, trailingSpace, jobs, picker)
+	}
 	remainder = strings.ToLower(remainder)
 	return dashboardCommandItemSuggestions(command, remainder)
 }
@@ -1688,57 +1694,141 @@ func dashboardRunCommandSuggestions(
 	return suggestions
 }
 
-// dashboardRespondCommandSuggestions lists paused jobs while the job ID is
-// typed, then shows the job's question while the answer is typed.
-func dashboardRespondCommandSuggestions(
-	remainder string,
+// dashboardJobPicker describes which jobs a job ID argument can name.
+type dashboardJobPicker struct {
+	include  func(store.Job) bool
+	describe func(store.Job) string
+	// rank orders suggestions; lower ranks come first.
+	rank   func(store.Job) int
+	suffix string
+	none   string
+}
+
+var dashboardJobPickers = map[string]dashboardJobPicker{
+	"attach": {
+		include:  func(store.Job) bool { return true },
+		describe: dashboardJobStatusDescription,
+		rank:     dashboardActiveFirst,
+		none:     "No jobs to attach to",
+	},
+	"cancel": {
+		include: func(job store.Job) bool {
+			switch job.Status {
+			case store.JobPending, store.JobQueued, store.JobRunning, store.JobWaitingInput:
+				return true
+			}
+			return false
+		},
+		describe: dashboardJobStatusDescription,
+		rank:     dashboardActiveFirst,
+		none:     "No jobs can be cancelled",
+	},
+	"retry": {
+		include:  func(job store.Job) bool { return jobsListAction(job) == "retry" },
+		describe: dashboardJobStatusDescription,
+		none:     "No finished jobs to retry",
+	},
+	"respond": {
+		include: func(job store.Job) bool {
+			return job.Status == store.JobWaitingInput || jobsListAction(job) == "retry"
+		},
+		describe: dashboardRespondDescription,
+		rank: func(job store.Job) int {
+			if job.Status == store.JobWaitingInput {
+				return 0
+			}
+			return 1
+		},
+		suffix: " ",
+		none:   "No paused or finished jobs",
+	},
+}
+
+func dashboardActiveFirst(job store.Job) int {
+	switch job.Status {
+	case store.JobRunning, store.JobWaitingInput, store.JobQueued:
+		return 0
+	}
+	return 1
+}
+
+func dashboardJobStatusDescription(job store.Job) string {
+	return job.Status + "  " + dashboardRunSuggestionDescription(job)
+}
+
+// dashboardJobIDSuggestions lists the jobs that command accepts while the job
+// ID is being typed.
+func dashboardJobIDSuggestions(
+	command, remainder string,
 	trailingSpace bool,
 	jobs []store.Job,
+	picker dashboardJobPicker,
 ) []dashboardCommandSuggestion {
-	var paused []store.Job
-	for _, job := range jobs {
-		if job.Status == store.JobWaitingInput {
-			paused = append(paused, job)
-		}
-	}
-	for _, job := range paused {
-		id := dashboardEscapeCommandArgument(job.ID)
-		if remainder == id && trailingSpace || strings.HasPrefix(remainder, id+" ") {
-			return []dashboardCommandSuggestion{{
-				usage:       "\"<answer>\"",
-				completion:  "respond " + id + " ",
-				description: dashboardRespondQuestion(job),
-			}}
-		}
+	if trailingSpace && strings.HasSuffix(remainder, `\`) {
+		remainder, trailingSpace = remainder+" ", false
 	}
 	if trailingSpace && remainder != "" {
 		return nil
 	}
 	query := strings.ToLower(strings.Trim(remainder, "\"'"))
-	suggestions := make([]dashboardCommandSuggestion, 0, len(paused))
-	for _, job := range paused {
-		id := dashboardEscapeCommandArgument(job.ID)
-		if !strings.HasPrefix(strings.ToLower(id), query) &&
-			!strings.HasPrefix(strings.ToLower(job.ID), query) {
-			continue
+	matches := make([]store.Job, 0, len(jobs))
+	for _, job := range jobs {
+		id := strings.ToLower(dashboardEscapeCommandArgument(job.ID))
+		if picker.include(job) &&
+			(strings.HasPrefix(id, query) || strings.HasPrefix(strings.ToLower(job.ID), query)) {
+			matches = append(matches, job)
 		}
+	}
+	if picker.rank != nil {
+		slices.SortStableFunc(matches, func(a, b store.Job) int {
+			return picker.rank(a) - picker.rank(b)
+		})
+	}
+	suggestions := make([]dashboardCommandSuggestion, 0, len(matches))
+	for _, job := range matches {
 		suggestions = append(suggestions, dashboardCommandSuggestion{
 			usage:       job.ID,
-			completion:  "respond " + id + " ",
-			description: dashboardRespondQuestion(job),
+			completion:  command + " " + dashboardEscapeCommandArgument(job.ID) + picker.suffix,
+			description: picker.describe(job),
 		})
 	}
 	if len(suggestions) == 0 && query == "" {
 		return []dashboardCommandSuggestion{{
-			usage:       "<job-id> \"<answer>\"",
-			completion:  "respond ",
-			description: "No jobs are waiting for an answer",
+			usage: "<job-id>", completion: command + " ", description: picker.none,
 		}}
 	}
 	return suggestions
 }
 
-func dashboardRespondQuestion(job store.Job) string {
+// dashboardRespondCommandSuggestions lists paused and finished jobs while the
+// job ID is typed, then shows what the job needs while the message is typed.
+func dashboardRespondCommandSuggestions(
+	remainder string,
+	trailingSpace bool,
+	jobs []store.Job,
+) []dashboardCommandSuggestion {
+	picker := dashboardJobPickers["respond"]
+	for _, job := range jobs {
+		id := dashboardEscapeCommandArgument(job.ID)
+		if !picker.include(job) ||
+			!(remainder == id && trailingSpace || strings.HasPrefix(remainder, id+" ")) {
+			continue
+		}
+		usage := "\"<answer>\""
+		if job.Status != store.JobWaitingInput {
+			usage = "\"<follow-up>\""
+		}
+		return []dashboardCommandSuggestion{{
+			usage: usage, completion: "respond " + id + " ", description: picker.describe(job),
+		}}
+	}
+	return dashboardJobIDSuggestions("respond", remainder, trailingSpace, jobs, picker)
+}
+
+func dashboardRespondDescription(job store.Job) string {
+	if job.Status != store.JobWaitingInput {
+		return "Follow up on " + job.Status + " job: " + dashboardText(job.Prompt)
+	}
 	question := dashboardText(job.Question)
 	if question == "" {
 		return "Waiting for an answer"

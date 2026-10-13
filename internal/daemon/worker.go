@@ -30,12 +30,31 @@ func (OpenRouterRunner) Run(
 	events openrouter_request.EventSink,
 	state openrouter_request.CheckpointStore,
 ) (string, error) {
-	return openrouter_request.Run(ctx, job.Prompt, openrouter_request.RunOptions{
+	options := openrouter_request.RunOptions{
 		JobID:         job.ID,
 		WorkspaceRoot: job.WorkspaceRoot,
 		Events:        events,
 		State:         state,
-	})
+	}
+	if strings.HasPrefix(job.InputToolCallID, store.FollowUpIDPrefix) {
+		followUp, found, err := state.LoadUserInputResponse(ctx, job.ID, job.InputToolCallID)
+		if err != nil {
+			return "", fmt.Errorf("load follow-up: %w", err)
+		}
+		if found {
+			options.FollowUp = followUp
+			if consumer, ok := state.(followUpConsumer); ok {
+				options.FollowUpSaved = func() error {
+					return consumer.ConsumeFollowUp(ctx, job.ID, job.InputToolCallID)
+				}
+			}
+		}
+	}
+	return openrouter_request.Run(ctx, job.Prompt, options)
+}
+
+type followUpConsumer interface {
+	ConsumeFollowUp(ctx context.Context, jobID, followUpID string) error
 }
 
 type Manager struct {

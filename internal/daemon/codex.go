@@ -14,6 +14,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/August-H/pearl-cli/internal/store"
@@ -43,6 +44,8 @@ const (
 // OpenRouter with the model and API key configured in Pearl.
 type CodexRunner struct {
 	Executable string
+	// OpenRouterURL overrides https://openrouter.ai, for tests.
+	OpenRouterURL string
 }
 
 type codexThreadStore interface {
@@ -121,6 +124,8 @@ func (r CodexRunner) Run(
 	switch {
 	case answer != "" && threadID != "":
 		prompt = answer
+	case answer != "" && strings.HasPrefix(job.InputToolCallID, store.FollowUpIDPrefix):
+		prompt = job.Prompt + "\n\nFollow-up from the user: " + answer
 	case answer != "":
 		prompt = job.Prompt + "\n\nYour earlier question was answered: " + answer
 	case threadID != "":
@@ -135,8 +140,37 @@ func (r CodexRunner) Run(
 	}
 	transcript = append(transcript, codexTranscriptMessage{Role: "user", Content: prompt})
 
+	var eventLock sync.Mutex
+	lockedEvents := func(event openrouter_request.AgentEvent) error {
+		if events == nil {
+			return nil
+		}
+		eventLock.Lock()
+		defer eventLock.Unlock()
+		return events(event)
+	}
+	upstream := strings.TrimSpace(r.OpenRouterURL)
+	if upstream == "" {
+		upstream = codexOpenRouterURL
+	}
+	baseURL := upstream + "/api/v1"
+	var modelLock sync.Mutex
+	lastModel := ""
+	proxy, err := startCodexModelProxy(upstream, func(model string) {
+		modelLock.Lock()
+		defer modelLock.Unlock()
+		if model != lastModel {
+			lastModel = model
+			_ = lockedEvents(openrouter_request.AgentEvent{Type: "model", Data: model})
+		}
+	})
+	if err == nil {
+		defer proxy.close()
+		baseURL = proxy.baseURL()
+	}
+
 	command := exec.CommandContext(ctx, executable, codexArguments(
-		strings.TrimSpace(settings.Model), codexContextWindow(settings.Model), threadID,
+		strings.TrimSpace(settings.Model), codexContextWindow(settings.Model), threadID, baseURL,
 	)...)
 	command.Dir = job.WorkspaceRoot
 	command.Env = append(os.Environ(), codexAPIKeyEnvironment+"="+apiKey)
@@ -156,7 +190,7 @@ func (r CodexRunner) Run(
 	parser := &codexEventParser{
 		ctx:        ctx,
 		job:        job,
-		events:     events,
+		events:     lockedEvents,
 		state:      state,
 		transcript: transcript,
 		idPrefix:   fmt.Sprintf("codex-%d-", time.Now().UnixNano()),
@@ -214,7 +248,8 @@ func codexResumeState(
 	if len(previous) > 0 {
 		threadID = previous[len(previous)-1].Data
 	}
-	if !strings.HasPrefix(job.InputToolCallID, codexQuestionIDPrefix) {
+	if !strings.HasPrefix(job.InputToolCallID, codexQuestionIDPrefix) &&
+		!strings.HasPrefix(job.InputToolCallID, store.FollowUpIDPrefix) {
 		return threadID, "", nil
 	}
 	response, found, err := state.LoadUserInputResponse(ctx, job.ID, job.InputToolCallID)
@@ -251,7 +286,56 @@ func codexQuestion(message string) string {
 	return ""
 }
 
-func codexArguments(model string, contextWindow int64, threadID string) []string {
+// codexTOMLString quotes text as a TOML basic string for a Codex -c override.
+func codexTOMLString(text string) string {
+	var quoted strings.Builder
+	quoted.WriteByte('"')
+	for _, character := range strings.ToValidUTF8(text, "\uFFFD") {
+		switch character {
+		case '"':
+			quoted.WriteString(`\"`)
+		case '\\':
+			quoted.WriteString(`\\`)
+		case '\n':
+			quoted.WriteString(`\n`)
+		case '\t':
+			quoted.WriteString(`\t`)
+		case '\r':
+			quoted.WriteString(`\r`)
+		default:
+			if character < 0x20 || character == 0x7f {
+				fmt.Fprintf(&quoted, `\u%04X`, character)
+			} else {
+				quoted.WriteRune(character)
+			}
+		}
+	}
+	quoted.WriteByte('"')
+	return quoted.String()
+}
+
+// codexDeveloperInstructions adds the user's saved skills to Pearl's
+// instructions. Codex can read files anywhere, so it opens a skill by path.
+func codexDeveloperInstructions(skills []openrouter_request.Skill) string {
+	if len(skills) == 0 {
+		return codexInstructions
+	}
+	var instructions strings.Builder
+	instructions.WriteString(codexInstructions)
+	instructions.WriteString("\n\nThe user saved these skills: instructions for specific kinds of tasks. ")
+	instructions.WriteString("When a skill fits the task, read its file before you start, then follow it.")
+	for _, skill := range skills {
+		instructions.WriteString("\n- " + skill.Name)
+		if skill.Description != "" {
+			instructions.WriteString(": " + skill.Description)
+		}
+		instructions.WriteString(" (" + skill.Path + ")")
+	}
+	return instructions.String()
+}
+
+func codexArguments(model string, contextWindow int64, threadID, baseURL string) []string {
+	skills, _ := openrouter_request.LoadSkills()
 	arguments := []string{"exec"}
 	if threadID != "" {
 		arguments = append(arguments, "resume")
@@ -260,12 +344,12 @@ func codexArguments(model string, contextWindow int64, threadID string) []string
 		"--json", "--skip-git-repo-check", "--ignore-user-config",
 		"-c", `model_provider="openrouter"`,
 		"-c", `model_providers.openrouter.name="OpenRouter"`,
-		"-c", `model_providers.openrouter.base_url="https://openrouter.ai/api/v1"`,
+		"-c", `model_providers.openrouter.base_url="`+baseURL+`"`,
 		"-c", `model_providers.openrouter.env_key="`+codexAPIKeyEnvironment+`"`,
 		"-c", `model_providers.openrouter.wire_api="responses"`,
 		"-c", `sandbox_mode="workspace-write"`,
 		"-c", `approval_policy="never"`,
-		"-c", "developer_instructions="+strconv.Quote(codexInstructions),
+		"-c", "developer_instructions="+codexTOMLString(codexDeveloperInstructions(skills)),
 	)
 	if contextWindow > 0 {
 		arguments = append(arguments, "-c", "model_context_window="+strconv.FormatInt(contextWindow, 10))

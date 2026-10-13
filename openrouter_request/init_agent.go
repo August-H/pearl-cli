@@ -139,6 +139,10 @@ type RunOptions struct {
 	OnlyTools               bool
 	Events                  EventSink
 	State                   CheckpointStore
+	// FollowUp continues a finished conversation with a new user message.
+	FollowUp string
+	// FollowUpSaved runs once FollowUp is part of the saved transcript.
+	FollowUpSaved func() error
 }
 
 // Tool adds a function that the model can call during a run. Parameters must
@@ -255,6 +259,11 @@ func Run(ctx context.Context, prompt string, options RunOptions) (string, error)
 	if systemPrompt := strings.TrimSpace(options.SystemPrompt); systemPrompt != "" {
 		messages = append(messages, agentMessage{Role: "system", Content: systemPrompt})
 	}
+	if !options.OnlyTools {
+		if skills, err := LoadSkills(); err == nil && len(skills) > 0 {
+			messages = append(messages, agentMessage{Role: "system", Content: skillsSystemPrompt(skills)})
+		}
+	}
 	messages = append(messages, agentMessage{Role: "user", Content: prompt})
 	transcriptMessages := append([]agentMessage(nil), messages...)
 	loadedTranscript := false
@@ -291,7 +300,17 @@ func Run(ctx context.Context, prompt string, options RunOptions) (string, error)
 		}
 	}
 
-	if loadedTranscript && len(transcriptMessages) > 0 {
+	followUp := strings.TrimSpace(options.FollowUp)
+	if followUp != "" && loadedTranscript && len(transcriptMessages) > 0 {
+		lastMessage := transcriptMessages[len(transcriptMessages)-1]
+		if lastMessage.Role == "user" && lastMessage.Content == followUp {
+			followUp = ""
+		}
+	}
+	if !loadedTranscript {
+		followUp = ""
+	}
+	if loadedTranscript && followUp == "" && len(transcriptMessages) > 0 {
 		lastMessage := transcriptMessages[len(transcriptMessages)-1]
 		if lastMessage.Role == "assistant" && len(lastMessage.ToolCalls) == 0 {
 			return lastMessage.Content, nil
@@ -310,6 +329,19 @@ func Run(ctx context.Context, prompt string, options RunOptions) (string, error)
 		return "", err
 	}
 	messages = completedMessages
+	if followUp != "" {
+		message := agentMessage{Role: "user", Content: followUp}
+		transcriptMessages = append(transcriptMessages, message)
+		messages = append(messages, message)
+		if err := saveAgentState(ctx, options, transcriptMessages, messages); err != nil {
+			return "", err
+		}
+		if options.FollowUpSaved != nil {
+			if err := options.FollowUpSaved(); err != nil {
+				return "", fmt.Errorf("record follow-up: %w", err)
+			}
+		}
+	}
 
 	toolDepth := countToolRounds(transcriptMessages)
 	compactionTokens := options.ContextCompactionTokens
@@ -420,10 +452,15 @@ func Run(ctx context.Context, prompt string, options RunOptions) (string, error)
 	}
 }
 
+// countToolRounds counts tool rounds since the latest user message, so each
+// follow-up gets its own tool budget.
 func countToolRounds(messages []agentMessage) int {
 	rounds := 0
 	for _, message := range messages {
-		if message.Role == "assistant" && len(message.ToolCalls) > 0 {
+		switch {
+		case message.Role == "user":
+			rounds = 0
+		case message.Role == "assistant" && len(message.ToolCalls) > 0:
 			rounds++
 		}
 	}
@@ -914,6 +951,9 @@ func agentTools(options RunOptions) []map[string]any {
 	if !options.OnlyTools {
 		tools = append(tools, allowedAgentTools()...)
 		tools = append(tools, workspaceToolDefinitions()...)
+		if skills, err := LoadSkills(); err == nil && len(skills) > 0 {
+			tools = append(tools, readSkillToolDefinition())
+		}
 	}
 	for _, tool := range options.Tools {
 		if strings.TrimSpace(tool.Name) == "" || tool.Execute == nil {
@@ -980,6 +1020,8 @@ func executeAgentTool(
 		}
 	} else if options.OnlyTools {
 		result = agentToolResult{Error: "tool is unavailable for this run"}
+	} else if call.Function.Name == readSkillTool {
+		result = runReadSkillTool(ctx, call)
 	} else if call.Function.Name == "run_command" {
 		result = runWorkspaceCommand(ctx, call, workspaceRoot)
 	} else {
