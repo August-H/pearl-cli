@@ -71,8 +71,11 @@ func CheckJobDirectory(path string) error {
 		}
 	}
 	for _, root := range DeniedRoots() {
-		if containsFold(path, root) || containsFold(root, path) {
-			return fmt.Errorf("Pearl won't run jobs in %s because it holds protected files such as %s; choose a project folder", path, root)
+		if containsFold(root, path) {
+			return fmt.Errorf("Pearl won't run jobs in %s because it is inside %s, which holds credentials or Pearl's own settings; choose a project folder", path, root)
+		}
+		if containsFold(path, root) {
+			return fmt.Errorf("Pearl won't run jobs in %s because it contains %s, which holds credentials or Pearl's own settings; choose a project folder", path, root)
 		}
 	}
 	return nil
