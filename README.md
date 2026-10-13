@@ -20,7 +20,8 @@ model tokens.
 ## Install
 
 One command installs the latest release binary, verifies its checksum, and
-prepares your PATH. No compiler or repository clone needed.
+prepares your PATH. It also installs a copy of Codex for the Codex harness. No
+compiler or repository clone needed.
 
 macOS and Linux:
 
@@ -93,7 +94,8 @@ make install
 
 `make install` embeds the version, commit, and build date into the binary and
 places it in `$(go env GOPATH)/bin`. Plain `go build -o pearl ./cmd/pearl`
-still works but produces a binary that reports `version dev`.
+still works but produces a binary that reports `version dev`. Run
+`pearl codex install` afterward to add Codex for the Codex harness.
 
 To place the binary somewhere specific instead:
 
@@ -231,9 +233,22 @@ installed when Pearl can't find it. When output isn't a terminal, `pearl
 harness` prints the current default instead.
 
 Jobs created without `--harness` use the default when they start, and
-`pearl jobs view` shows which harness ran each job. Codex must be installed
-(`npm install -g @openai/codex`); set `PEARL_CODEX_PATH` if the daemon cannot
-find it.
+`pearl jobs view` shows which harness ran each job.
+
+The install script installs Pearl's own copy of Codex (version 0.159.0, about
+300 MB) next to Pearl's settings. It is downloaded from OpenAI's GitHub
+release and checked against a checksum built into Pearl. `pearl update`
+keeps it in step with the version each Pearl release is tested against.
+
+```bash
+pearl codex                  # show which Codex the harness uses
+pearl codex install          # install Pearl's copy, e.g. after building from source
+pearl codex install --force  # download and reinstall it
+```
+
+Pearl uses its own copy first, then a `codex` on your `PATH`. Set
+`PEARL_CODEX_PATH` to use a specific Codex instead, or `PEARL_SKIP_CODEX=1`
+when running the install script to skip Codex.
 
 Codex jobs run in Codex's `workspace-write` sandbox: commands can change files
 in the job directory but have no network access. Pearl ignores your

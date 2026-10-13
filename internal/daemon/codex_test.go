@@ -125,7 +125,8 @@ func TestCodexRunnerUsesOpenRouterAndRecordsTheRun(t *testing.T) {
 		"exec --json", `model_provider="openrouter"`,
 		`model_providers.openrouter.base_url="http://127.0.0.1:`,
 		`model_providers.openrouter.env_key="` + codexAPIKeyEnvironment + `"`,
-		`sandbox_mode="workspace-write"`, "-m openrouter/free",
+		`approval_policy="on-request"`, `approvals_reviewer="auto_review"`, "auto_review.extra_policy=",
+		"-m openrouter/free",
 	} {
 		if !strings.Contains(joined, expected) {
 			t.Fatalf("Codex arguments %q are missing %q", arguments, expected)

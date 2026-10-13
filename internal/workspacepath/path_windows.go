@@ -29,6 +29,9 @@ func Canonical(path string) (string, error) {
 	return strings.TrimPrefix(resolved, `\\?\`), nil
 }
 
+// LinkCount is 1 on Windows, where FileInfo does not report hard links.
+func LinkCount(os.FileInfo) uint64 { return 1 }
+
 func IsLink(info os.FileInfo) bool {
 	if data, ok := info.Sys().(*syscall.Win32FileAttributeData); ok {
 		return data.FileAttributes&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0

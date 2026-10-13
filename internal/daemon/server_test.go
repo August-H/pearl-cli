@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -167,11 +168,7 @@ func testFolderRequest(
 }
 
 func TestServerCreatesJobsInFolders(t *testing.T) {
-	runtimeDirectory, err := os.MkdirTemp("/tmp", "pearl-daemon-test-")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.RemoveAll(runtimeDirectory) })
+	runtimeDirectory := socketTempDir(t, "pearl-daemon-test-")
 	paths := pearlpaths.Paths{
 		Directory: runtimeDirectory,
 		Database:  filepath.Join(runtimeDirectory, "pearl.db"),
@@ -214,11 +211,7 @@ func TestServerCreatesJobsInFolders(t *testing.T) {
 }
 
 func TestServerProcessesQueuedJobsWithOneAgent(t *testing.T) {
-	runtimeDirectory, err := os.MkdirTemp("/tmp", "pearl-daemon-test-")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.RemoveAll(runtimeDirectory) })
+	runtimeDirectory := socketTempDir(t, "pearl-daemon-test-")
 	paths := pearlpaths.Paths{
 		Directory: runtimeDirectory,
 		Database:  filepath.Join(runtimeDirectory, "pearl.db"),
@@ -319,4 +312,20 @@ func TestServerProcessesQueuedJobsWithOneAgent(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("daemon did not stop")
 	}
+}
+
+// socketTempDir makes a temp folder for a daemon socket. Unix socket paths are
+// limited to about 104 bytes, and macOS's default temp folder is too long.
+func socketTempDir(t *testing.T, prefix string) string {
+	t.Helper()
+	parent := "/tmp"
+	if runtime.GOOS == "windows" {
+		parent = ""
+	}
+	directory, err := os.MkdirTemp(parent, prefix)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(directory) })
+	return directory
 }

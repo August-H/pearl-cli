@@ -16,6 +16,7 @@ import (
 
 	"github.com/August-H/pearl-cli/internal/pearlpaths"
 	"github.com/August-H/pearl-cli/internal/store"
+	"github.com/August-H/pearl-cli/internal/workspacepath"
 	"github.com/August-H/pearl-cli/openrouter_request"
 )
 
@@ -716,6 +717,9 @@ func validateWorkspace(path string) (string, error) {
 	}
 	if !info.IsDir() {
 		return "", fmt.Errorf("workspace_root %q is not a directory", absolute)
+	}
+	if err := workspacepath.CheckJobDirectory(absolute); err != nil {
+		return "", err
 	}
 	// Enforce approved_workspace_roots early so invalid submissions fail
 	// fast instead of sitting in the queue and failing when the worker runs.
