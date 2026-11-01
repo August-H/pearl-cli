@@ -132,8 +132,6 @@ func TestSplitTrailingJobFlagsAcceptsFlagsAfterPrompt(t *testing.T) {
 		{[]string{"update the docs", "-n", "docs"}, []string{"update the docs"}, trailingJobFlags{name: "docs"}},
 		{[]string{"update the docs", "--name=docs", "-d"}, []string{"update the docs"}, trailingJobFlags{name: "docs", chooseDirectory: true}},
 		{[]string{"update", "the", "docs", "--directory", "-n", "fix docs"}, []string{"update", "the", "docs"}, trailingJobFlags{name: "fix docs", chooseDirectory: true}},
-		{[]string{"update the docs", "--harness", "codex", "-n", "docs"}, []string{"update the docs"}, trailingJobFlags{name: "docs", harness: "codex"}},
-		{[]string{"update the docs", "--harness=pearl"}, []string{"update the docs"}, trailingJobFlags{harness: "pearl"}},
 		{[]string{"--directory", "-n", "docs", "update the docs"}, []string{"--directory", "-n", "docs", "update the docs"}, trailingJobFlags{}},
 		{[]string{"explain --directory flags"}, []string{"explain --directory flags"}, trailingJobFlags{}},
 		{[]string{"explain", "-n"}, []string{"explain", "-n"}, trailingJobFlags{}},

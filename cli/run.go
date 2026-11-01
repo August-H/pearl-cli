@@ -17,7 +17,6 @@ import (
 	"time"
 	"unicode"
 
-	"github.com/August-H/pearl-cli/internal/daemon"
 	"github.com/August-H/pearl-cli/internal/store"
 	"github.com/August-H/pearl-cli/internal/verification"
 	"github.com/August-H/pearl-cli/openrouter_request"
@@ -36,7 +35,6 @@ const usage = `Pearl CLI
 Usage:
   pearl --workspace <path> <command>                      Run a command in a workspace
   pearl job "prompt" [-n name] [-d | --workspace path]    Create a pending job
-    --harness pearl|codex                                 Choose the agent harness for this job
     -f, --folder name                                     Create the job in a folder
   pearl folder [list]                                      List job folders
     create <name> [-d | --workspace path]                   Create a folder for a directory
@@ -44,12 +42,15 @@ Usage:
     remove <name>                                          Remove a folder and keep its jobs
   pearl run [--detach] <job-id>                            Run or retry a job
   pearl configure                                          Set the API key and model
-  pearl auth login chatgpt                                 Link your ChatGPT plan
-  pearl auth [status|accounts|use <id>|logout]              Manage linked ChatGPT accounts
+  pearl auth login chatgpt|claude|antigravity              Sign in; its models appear in pearl model
+  pearl auth [status|accounts|use <id>|logout]              Manage your sign-ins
   pearl provider [openrouter|chatgpt]                      Choose how model usage is billed
   pearl model [--list] [--set <model-id>] [--free]         Browse and set the model
-  pearl harness [pearl|codex]                              Choose the default agent harness
-  pearl codex [install]                                    Check or install Pearl's copy of Codex
+  pearl usage [chatgpt|claude|antigravity]                 Show your plan's usage limits
+  pearl accounts                                           Show every signed-in account and its limits
+  pearl codex                                              Check the Codex connection
+  pearl claude [login|logout]                              Check the Claude Code connection
+  pearl antigravity [login|logout]                         Check the Antigravity connection
   pearl skills [list | path]                               Open the folder for skill files
   pearl jobs [--all]                                       List jobs for this directory
     view <job-id>                                           Show job details and transcript
@@ -117,7 +118,7 @@ func Run(args []string) int {
 		case 2:
 			return Run([]string{args[1], "--help"})
 		case 3:
-			// Only known pairs: a command such as "codex install" would run.
+			// Only known pairs: a command such as "auth logout" would run.
 			if commandHelp([]string{args[1], args[2], "--help"}) {
 				return 0
 			}
@@ -150,8 +151,10 @@ func Run(args []string) int {
 		return runConfigure(args[1:])
 	case "model":
 		return runModel(args[1:])
-	case "harness":
-		return runHarness(args[1:])
+	case "usage":
+		return runUsage(args[1:])
+	case "accounts":
+		return runAccounts(args[1:])
 	case "job":
 		return createJob(args[1:])
 	case "folder", "folders":
@@ -160,6 +163,10 @@ func Run(args []string) int {
 		return runSkills(args[1:])
 	case "codex":
 		return runCodex(args[1:])
+	case "claude":
+		return runClaude(args[1:])
+	case "antigravity":
+		return runAntigravity(args[1:])
 	case "run":
 		return runJob(args[1:])
 	case "daemon":
@@ -204,43 +211,6 @@ func Run(args []string) int {
 	default:
 		return printInvalidCommand(args[0])
 	}
-}
-
-const harnessUsage = "Usage: pearl harness [pearl|codex]"
-
-func runHarness(args []string) int {
-	if len(args) == 1 && (args[0] == "-h" || args[0] == "--help") {
-		fmt.Println(harnessUsage)
-		return 0
-	}
-	if len(args) > 1 {
-		fmt.Fprintln(os.Stderr, harnessUsage)
-		return 2
-	}
-	current := daemon.DefaultHarness()
-	choice := ""
-	if len(args) == 1 {
-		choice = args[0]
-	} else if term.IsTerminal(int(os.Stdin.Fd())) && term.IsTerminal(int(os.Stdout.Fd())) {
-		chosen, err := runHarnessTUI(os.Stdin, os.Stdout, current)
-		if err != nil {
-			return printError("Harness", err)
-		}
-		if chosen == "" || chosen == current {
-			fmt.Println("Harness unchanged:", current)
-			return 0
-		}
-		choice = chosen
-	} else {
-		fmt.Println("Harness:", current)
-		return 0
-	}
-	harness, err := saveDefaultHarness(choice)
-	if err != nil {
-		return printError("Harness", err)
-	}
-	fmt.Println("Harness:", harness)
-	return 0
 }
 
 func runConfigure(args []string) int {
@@ -390,7 +360,6 @@ type trailingJobFlags struct {
 	name            string
 	chooseDirectory bool
 	workspace       string
-	harness         string
 	folder          string
 }
 
@@ -416,9 +385,6 @@ func splitTrailingJobFlags(args []string) ([]string, trailingJobFlags) {
 		case strings.HasPrefix(last, "-n="), strings.HasPrefix(last, "--name="):
 			_, trailing.name, _ = strings.Cut(last, "=")
 			rest = rest[:len(rest)-1]
-		case strings.HasPrefix(last, "--harness="):
-			trailing.harness = strings.TrimPrefix(last, "--harness=")
-			rest = rest[:len(rest)-1]
 		case strings.HasPrefix(last, "-f="), strings.HasPrefix(last, "--folder="):
 			_, trailing.folder, _ = strings.Cut(last, "=")
 			rest = rest[:len(rest)-1]
@@ -427,9 +393,6 @@ func splitTrailingJobFlags(args []string) ([]string, trailingJobFlags) {
 			rest = rest[:len(rest)-2]
 		case previous == "--workspace":
 			trailing.workspace = last
-			rest = rest[:len(rest)-2]
-		case previous == "--harness":
-			trailing.harness = last
 			rest = rest[:len(rest)-2]
 		case previous == "-n" || previous == "--name":
 			trailing.name = last
@@ -445,6 +408,11 @@ func createJobWithDirectoryPicker(
 	args []string,
 	pickDirectory func(string) (string, error),
 ) int {
+	for _, argument := range args {
+		if argument == "--harness" || strings.HasPrefix(argument, "--harness=") {
+			return printError("Job", errors.New("the model decides the harness now; choose one with `pearl model`"))
+		}
+	}
 	flags := flag.NewFlagSet("job", flag.ContinueOnError)
 	flags.SetOutput(flagOutput(args))
 	name := flags.String("n", "", "job ID, up to 20 characters")
@@ -452,13 +420,11 @@ func createJobWithDirectoryPicker(
 	chooseDirectory := flags.Bool("d", false, "choose the job directory")
 	workspacePath := flags.String("workspace", "", "workspace directory path (no picker)")
 	flags.BoolVar(chooseDirectory, "directory", false, "choose the job directory")
-	harness := flags.String("harness", "", "agent harness: pearl or codex")
 	folder := flags.String("f", "", "folder to create the job in")
 	flags.StringVar(folder, "folder", "", "folder to create the job in")
 	flags.Usage = func() {
-		fmt.Fprintln(flags.Output(), `Usage: pearl job "prompt" [-n name] [--harness pearl|codex] [-f folder | -d | --workspace path]`)
+		fmt.Fprintln(flags.Output(), `Usage: pearl job "prompt" [-n name] [-f folder | -d | --workspace path]`)
 		fmt.Fprintln(flags.Output(), "  -n, --name name   Use a custom job ID, up to 20 characters")
-		fmt.Fprintln(flags.Output(), "  --harness name    Run with Pearl's harness or Codex (default: pearl harness setting)")
 		fmt.Fprintln(flags.Output(), "  -f, --folder name Create the job in a folder and use its directory")
 		fmt.Fprintln(flags.Output(), "  -d, --directory   Open a directory picker")
 		fmt.Fprintln(flags.Output(), "  --workspace path  Use a directory without opening a picker")
@@ -479,9 +445,6 @@ func createJobWithDirectoryPicker(
 	if trailing.workspace != "" {
 		*workspacePath = trailing.workspace
 	}
-	if trailing.harness != "" {
-		*harness = trailing.harness
-	}
 	if trailing.folder != "" {
 		*folder = trailing.folder
 	}
@@ -491,10 +454,6 @@ func createJobWithDirectoryPicker(
 		return 2
 	}
 	if err := store.ValidateJobName(*name); err != nil {
-		return printError("Job", err)
-	}
-	selectedHarness, err := store.NormalizeHarness(*harness)
-	if err != nil {
 		return printError("Job", err)
 	}
 	if *chooseDirectory && *workspacePath != "" {
@@ -507,7 +466,7 @@ func createJobWithDirectoryPicker(
 		if err := ensureDaemonRunning(); err != nil {
 			return printError("Job", err)
 		}
-		return createPendingJobInFolder(*name, prompt, "", selectedHarness, *folder)
+		return createPendingJobInFolder(*name, prompt, "", *folder)
 	}
 	workspace, err := os.Getwd()
 	if err != nil {
@@ -532,7 +491,7 @@ func createJobWithDirectoryPicker(
 	if err := ensureDaemonRunning(); err != nil {
 		return printError("Job", err)
 	}
-	return createPendingJob(*name, prompt, workspace, selectedHarness)
+	return createPendingJob(*name, prompt, workspace)
 }
 
 func runJob(args []string) int {
@@ -589,11 +548,11 @@ func ensureDaemonRunning() error {
 	return nil
 }
 
-func createPendingJob(name, prompt, workspace, harness string) int {
-	return createPendingJobInFolder(name, prompt, workspace, harness, "")
+func createPendingJob(name, prompt, workspace string) int {
+	return createPendingJobInFolder(name, prompt, workspace, "")
 }
 
-func createPendingJobInFolder(name, prompt, workspace, harness, folder string) int {
+func createPendingJobInFolder(name, prompt, workspace, folder string) int {
 	prompt = strings.TrimSpace(prompt)
 	if prompt == "" {
 		fmt.Fprintln(os.Stderr, "Prompt cannot be empty")
@@ -604,7 +563,7 @@ func createPendingJobInFolder(name, prompt, workspace, harness, folder string) i
 		return printError("Pearl", err)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	job, err := client.submitJob(ctx, strings.TrimSpace(name), prompt, workspace, harness, folder)
+	job, err := client.submitJob(ctx, strings.TrimSpace(name), prompt, workspace, folder)
 	cancel()
 	if err != nil {
 		return printError("Pearl", err)
@@ -618,7 +577,7 @@ func createPendingJobInFolder(name, prompt, workspace, harness, folder string) i
 	}
 	fmt.Println("Directory:", displayJobDirectory(workspace))
 	if job.Harness != "" {
-		fmt.Println("Harness:", job.Harness)
+		fmt.Println("Harness:", harnessLabel(job.Harness))
 	}
 	return 0
 }
@@ -650,7 +609,7 @@ func attachWithClientAfter(client *daemonClient, jobID string, after int64) int 
 				Harness  string `json:"harness"`
 			}
 			if json.Unmarshal([]byte(event.Data), &config) == nil {
-				fmt.Printf("\n[run] %s · %s · Harness: %s\n", config.Provider, config.Model, config.Harness)
+				fmt.Printf("\n[run] %s · %s · Harness: %s\n", billingLabel(config.Provider), modelLabel(config.Model), harnessLabel(config.Harness))
 				currentSection = ""
 			}
 		case "verification":
@@ -759,7 +718,11 @@ func attachModelLine(models []string) string {
 	if len(models) > 1 {
 		label = "[models]"
 	}
-	return label + " " + strings.Join(models, ", ")
+	labels := make([]string, 0, len(models))
+	for _, model := range models {
+		labels = append(labels, modelLabel(model))
+	}
+	return label + " " + strings.Join(labels, ", ")
 }
 
 func listJobs(showAll bool) int {

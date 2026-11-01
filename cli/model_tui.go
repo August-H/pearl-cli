@@ -30,6 +30,9 @@ type modelRow struct {
 	current  bool
 	label    string
 	starred  bool
+	// connection is the provider a signed-in connection serves this model from.
+	// It's empty for OpenRouter's catalog.
+	connection string
 	// Prices are formatted per million tokens; "" means unknown.
 	inputPrice     string
 	outputPrice    string
@@ -330,7 +333,7 @@ func renderModelScreenCore(
 		title += strings.Repeat(" ", width-len([]rune(title))-len([]rune(count))) + count
 	}
 	divider := strings.Repeat("─", width)
-	status := "Current: " + currentID
+	status := "Current: " + modelLabel(currentID)
 	if currentID == "" {
 		status = "Current: (unset)"
 	}

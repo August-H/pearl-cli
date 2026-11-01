@@ -20,8 +20,8 @@ model tokens.
 ## Install
 
 One command installs the latest release binary, verifies its checksum, and
-prepares your PATH. It also installs a copy of Codex for the Codex harness. No
-compiler or repository clone needed.
+prepares your PATH. No compiler or repository clone needed. GPT models also need
+the [Codex CLI](https://github.com/openai/codex), which you install yourself.
 
 macOS and Linux:
 
@@ -106,8 +106,7 @@ make install
 
 `make install` embeds the version, commit, and build date into the binary and
 places it in `$(go env GOPATH)/bin`. Plain `go build -o pearl ./cmd/pearl`
-still works but produces a binary that reports `version dev`. Run
-`pearl codex install` afterward to add Codex for the Codex harness.
+still works but produces a binary that reports `version dev`.
 
 To place the binary somewhere specific instead:
 
@@ -138,15 +137,17 @@ pearl provider openrouter                # Switch to your saved OpenRouter model
 pearl provider chatgpt                   # Switch back to your connected account
 ```
 
-Both harnesses and autonomous planning use the selected provider. The daemon
+The model you select decides the provider. The daemon
 reads the selection when a job starts; no restart is required. A running job
 keeps its original ChatGPT account. Provider changes apply to jobs that start
-afterward, including retries. OpenRouter and ChatGPT model preferences are saved
-separately. `pearl configure` selects OpenRouter again.
+afterward, including retries. Each provider remembers its own model.
+`pearl configure` selects OpenRouter again.
 
-With ChatGPT selected, `pearl model` and `pearl model --list` use the account's
-current catalog. `pearl model --set <slug>` selects one of those models.
-OpenRouter's Free Tier and catalog filters do not apply to ChatGPT.
+`pearl model` and `pearl model --list` show the models from every account you're
+signed in to: Claude from Claude Code, GPT from ChatGPT, and Gemini from
+Antigravity. Each one reports its own current list. Selecting a model, in the menu
+or with `pearl model --set <id>`, also switches to its provider and harness. The
+list tells you which accounts aren't signed in yet.
 
 Pearl uses OpenAI's documented [Sign in with ChatGPT public-client flow](https://developers.openai.com/siwc/token-sharing-open-source/sign-in)
 and [Responses API route for plan usage](https://developers.openai.com/siwc/token-sharing-open-source/models-and-inference).
@@ -180,7 +181,8 @@ errors still require action; Pearl does not retry those automatically.
 a custom model ID. It stores the selection in the durable `settings.json`. The
 same wizard runs inside the dashboard command box when you enter `configure`.
 
-With OpenRouter selected, `pearl model` opens a lab menu for its catalog, with batch
+OpenRouter's catalog appears only when OpenRouter is selected and you aren't signed
+in to any of those accounts. Then `pearl model` opens a lab menu for it, with batch
 variants, GPT Pro models, and media generation models hidden. The menu keeps
 text chat models, including those that accept images, and hides models that
 produce images, video, or audio. Only models added to OpenRouter within the past
@@ -197,9 +199,15 @@ Esc clears a search, then goes back or closes the lab menu; Ctrl-C closes the
 picker from either menu. The Pearl lab contains the Free Tier option, `openrouter/free`.
 Inside a lab, each row shows the model's readable name, sorted newest first by
 the date it was added to OpenRouter. Enter `model` in the
-dashboard to open the same picker. The catalog refreshes every time the command
-runs, with a cached list available if the refresh fails. Use `--list` to print
-the catalog, `--set <model-id>` to set a model directly, or `--free` to use the
+dashboard to open the same picker.
+
+Your signed-in accounts' models open right away from a saved list. If that list is
+over 5 minutes old, Pearl checks for changes in the background, and they appear the
+next time you open the picker. Signing in or out through Pearl clears the list.
+Add `--refresh` to wait for an up-to-date list. OpenRouter's catalog is fetched
+each time, with a cached list available if that fails.
+
+Use `--list` to print the catalog, `--set <model-id>` to set a model directly, or `--free` to use the
 Free Tier.
 
 ## Dashboard
@@ -224,14 +232,22 @@ dashboard returns after other commands finish. Type
 colors. Job suggestions also use the current workspace. Open `jobs --all` when
 you need a job from another directory.
 
+The composer stays at the bottom of the screen. When the output above it doesn't
+fit, scroll with the mouse wheel or PgUp/PgDn, and press Home or End to jump to the
+top or bottom. A line above the composer shows how much is out of view.
+
 The composer wraps long drafts and keeps pasted newlines without submitting
-them. Press Alt+Enter to insert a newline, or Ctrl+E to edit the entire draft in
-`$VISUAL`, `$EDITOR`, or `vi`. Enter submits the draft. Quote multiline prompts
+them. Press Shift+Enter to insert a newline, or Ctrl+E to edit the entire draft in
+`$VISUAL`, `$EDITOR`, or `vi`. Enter submits the draft. Some terminals, including
+macOS Terminal, can't tell Shift+Enter from Enter, so Shift+Enter submits there. Use
+Ctrl+J instead, which works everywhere. Alt+Enter also adds a newline. Quote multiline prompts
 as you would any argument, for example `respond <job-id> "first line` followed
 by the remaining lines and a closing quote. A command error keeps the draft.
 
 Each running job shows its recorded provider, model, harness, and test status.
-The composer labels the default model and harness separately; changing a default
+Each job shows how it was billed: ChatGPT subscription, Claude subscription, Gemini
+subscription, or API.
+The composer shows the selected model and its harness; changing the model
 does not relabel a run already in progress. `jobs view <job-id>` includes these
 details and the test command. Tests start as `not run`, become `running` when a
 recognized test command starts, then `passed` or `failed` from its exit status.
@@ -310,7 +326,7 @@ directory they started in.
 
 A skill is a Markdown file of instructions for one kind of task, such as how
 you like commits written or how to ship a release. Every job can use your
-skills, with either harness.
+skills, with any harness.
 
 ```bash
 pearl skills          # open the skills folder and list your skills
@@ -334,41 +350,57 @@ line of text is its description. Jobs see each skill's name and description
 and load the full text only when a skill fits the task. Changes apply to the
 next job that starts.
 
-## Harnesses
-
-A harness is the agent loop that does the work. Pearl ships its own, and it
-can also run jobs with the [Codex CLI](https://github.com/openai/codex). Both
-use the provider and model selected in Pearl. Link ChatGPT with
-`pearl auth login chatgpt`, or configure an OpenRouter API key with `pearl configure`.
+## Usage limits
 
 ```bash
-pearl job "fix the failing tests" --harness codex
-pearl harness            # pick the default harness from a menu
-pearl harness codex      # run new jobs with Codex by default
-pearl harness pearl      # switch back
+pearl usage                       # the plan for the selected model
+pearl usage chatgpt               # or name one: chatgpt, claude, antigravity
 ```
 
-The menu lists every harness and marks the current one. Codex shows as not
-installed when Pearl can't find it. When output isn't a terminal, `pearl
-harness` prints the current default instead.
+`pearl usage` shows how much of each limit you've used and when it resets. It asks
+each provider directly, so it's live and uses no tokens. It's also a dashboard
+command.
 
-Jobs created without `--harness` use the default when they start, and
-`pearl jobs view` shows which harness ran each job.
+- **Claude** asks your installed Claude Code.
+- **ChatGPT** asks Codex, because Pearl's own ChatGPT sign-in can't read limits. Codex
+  must be signed in too, and Pearl warns you if that's a different account.
+- **Gemini** uses Pearl's Antigravity sign-in.
 
-The install script installs Pearl's own copy of Codex (version 0.159.0, about
-300 MB) next to Pearl's settings. It is downloaded from OpenAI's GitHub
-release and checked against a checksum built into Pearl. `pearl update`
-keeps it in step with the version each Pearl release is tested against.
+API billing has no plan limits to show. That includes OpenRouter, and Claude Code
+when `ANTHROPIC_API_KEY` is set.
+
+To see everything at once, run `pearl accounts`. It lists every account you're
+signed in to with its limits and marks the one in use. It's also a dashboard
+command. A ChatGPT account that Codex isn't signed in to is listed without limits,
+because OpenAI only gives them to Codex's own login.
+
+## Harnesses
+
+A harness is the agent loop that does the work. You don't choose one: the model
+you pick in `pearl model` decides it.
+
+| Model | Sign-in | Harness |
+|---|---|---|
+| Claude | `pearl auth login claude` | Your installed Claude Code |
+| GPT | `pearl auth login chatgpt` | Your installed Codex |
+| Gemini | `pearl auth login antigravity` | Your installed Antigravity server |
+| OpenRouter | `pearl configure` | Pearl's own agent loop |
+
+A new job or a retry uses the model selected when it starts. Answering a question
+or following up continues in the harness that holds the conversation, if it can
+still run. `pearl jobs view` shows which harness ran each job.
+
+Pearl doesn't include or download any of these tools. GPT models run on the Codex
+CLI you install yourself (`npm install -g @openai/codex`), and Codex's updates are
+yours to manage too. If you used an earlier version of Pearl, its downloaded copy of
+Codex is deleted the next time the daemon starts.
 
 ```bash
 pearl codex                  # show which Codex the harness uses
-pearl codex install          # install Pearl's copy, e.g. after building from source
-pearl codex install --force  # download and reinstall it
 ```
 
-Pearl uses its own copy first, then a `codex` on your `PATH`. Set
-`PEARL_CODEX_PATH` to use a specific Codex instead, or `PEARL_SKIP_CODEX=1`
-when running the install script to skip Codex.
+Pearl looks for `codex` on your `PATH`, then in common install locations. Set
+`PEARL_CODEX_PATH` to use a specific Codex instead.
 
 Codex jobs run in Codex's `workspace-write` sandbox: commands can change files
 in the job directory but have no network access. Pearl ignores your
@@ -384,6 +416,69 @@ into the same Codex session. Weaker models sometimes ask in plain text instead,
 in which case the job finishes with the question as its result. Codex also sends a
 much larger prompt with each request than Pearl's harness, which costs more on
 paid models. Autonomous mode always uses Pearl's harness for its own planning.
+
+### Claude Code
+
+```bash
+pearl auth login claude           # sign in with Claude Code's own login
+pearl auth logout claude          # sign out of Claude Code
+pearl claude                      # show which Claude Code Pearl uses
+```
+
+Pearl runs the `claude` CLI you installed, and it uses that CLI's sign-in and
+plan. Pearl never installs or bundles Claude Code. It looks for `claude` on your
+`PATH` and in common install locations. Set `PEARL_CLAUDE_PATH` to use a specific
+one.
+
+Bash commands run in Claude Code's own sandbox, which can write only to the
+workspace and temp folders and can't read the paths Pearl protects. Pearl answers
+Claude Code's other permission requests itself:
+
+- Files outside the workspace can be read, except protected paths. Only files
+  inside the workspace can be changed.
+- `WebFetch` and network access from commands need `allow_command_network`.
+- Commands that can't be sandboxed need `allow_unsandboxed_commands`.
+- MCP tools and any tool Pearl doesn't recognize are refused.
+
+Pearl always uses your Claude sign-in, so Anthropic models in `pearl model` really
+run on Claude. It ignores shell variables that send Claude Code to another endpoint
+or rename its models, such as `ANTHROPIC_BASE_URL`, `ANTHROPIC_AUTH_TOKEN` and
+`ANTHROPIC_DEFAULT_OPUS_MODEL`. Running `claude` yourself still uses them.
+
+Your own Claude Code settings, hooks, and `CLAUDE.md` files still apply. Claude
+Code may leave a `.claude` folder in the workspace. Retrying or answering a job
+resumes its Claude Code session.
+
+### Antigravity
+
+```bash
+pearl auth login antigravity      # sign in with your Google account
+pearl auth logout antigravity     # remove Pearl's saved sign-in
+pearl antigravity                 # show which server Pearl uses
+```
+
+Pearl talks to an Antigravity ACP server (`agy_acp_server`) over the Agent Client
+Protocol. Pearl never downloads or bundles it. `Antigravity.app` doesn't include
+this server, so Pearl looks in this order: `PEARL_ANTIGRAVITY_PATH`, your `PATH`,
+then the copy T3 Code installs for its Antigravity provider. It needs
+`localharness_external` in the same folder.
+
+Pearl keeps its own Google sign-in in `~/.gemini/pearl-antigravity`, apart from
+T3 Code and your other tools, so run `pearl auth login antigravity` once. Set
+`PEARL_ANTIGRAVITY_HOME` to move it. If a saved sign-in stops working, the job
+fails and asks you to sign in again. Only Google account sign-in is supported.
+
+The whole server runs in Pearl's command sandbox, because the server runs its own
+commands. They can write only to the workspace, temp folders, per-user caches, and
+that sign-in folder, and they can't read protected paths. Two limits follow from
+sharing one sandbox: commands have network access, because the server needs it to
+reach the model, and they can read the saved sign-in. They can also open
+pseudo-terminals, which the server runs commands in. Use Antigravity only with
+projects you trust. Where no sandbox is available, jobs fail unless you set
+`allow_unsandboxed_commands`.
+
+Skills are sent with the first prompt, up to 64 KiB in total. Retrying or
+answering a job resumes its Antigravity session.
 
 The durable queue, schedules, and daemon lifecycle remain available as advanced
 operations:
@@ -464,7 +559,9 @@ The Makefile embeds the same version, commit, and date locally via
 ## Autonomous mode
 
 `pearl autonomous "goal"` starts a persisted coordinator for the current
-directory. The coordinator cannot edit files itself. It can create queued child
+directory. Its jobs use the selected model. The coordinator itself plans with
+ChatGPT or OpenRouter, so with a Claude or Google model selected you also need one
+of those. The coordinator cannot edit files itself. It can create queued child
 jobs, wait for their agents, inspect every saved result or error, and create
 follow-up jobs. It finishes the session only after it reviews the child jobs and
 judges the goal complete.
@@ -554,8 +651,9 @@ Pearl daemon
     ├── SQLite jobs, events, transcripts, tool journal, schedules
     ├── scheduler ──► durable FIFO queue
     └── one worker
-           └── Pearl or Codex agent loop, using ChatGPT or OpenRouter
-                  └── workspace-scoped file tools
+           ├── Pearl or Codex agent loop, using ChatGPT or OpenRouter
+           │      └── workspace-scoped file tools
+           └── installed Claude Code CLI or Antigravity server, using its own sign-in
 ```
 
 The important package boundaries are:
@@ -571,6 +669,10 @@ run/event/cancel/retry/respond routes, `/v1/schedules`, and `/v1/shutdown`. It
 is intentionally reachable only through the Unix socket.
 
 ## Durability and recovery
+
+Only one daemon can run for a config folder. It holds a lock file for as long as
+it runs, and the system releases that lock if it dies. A second daemon refuses to
+start, and `pearl daemon restart` waits for the old one to finish.
 
 Pearl writes a job to SQLite before acknowledging submission. Agent messages are
 checkpointed after completed model and tool steps. Tool results are keyed by the

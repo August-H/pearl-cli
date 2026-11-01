@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -36,5 +37,16 @@ func TestRepositorySettingsAreNotImportedDuringSetup(t *testing.T) {
 	}
 	if settings.Model != FreeTierModel || settings.Max_depth != 30 || len(settings.Approved_workspace_roots) != 0 {
 		t.Fatalf("settings came from the repository: %+v", settings)
+	}
+}
+
+func TestOnlyTerminalSandboxesCanOpenPseudoTerminals(t *testing.T) {
+	plain := seatbeltProfile(commandSandbox{Writable: []string{"/w"}})
+	if strings.Contains(plain, "/dev/ptmx") || strings.Contains(plain, "ttys") {
+		t.Fatalf("agent commands can open terminals:\n%s", plain)
+	}
+	terminal := seatbeltProfile(commandSandbox{Writable: []string{"/w"}, Terminals: true})
+	if !strings.Contains(terminal, "/dev/ptmx") || !strings.Contains(terminal, "ttys") {
+		t.Fatalf("terminals are blocked:\n%s", terminal)
 	}
 }

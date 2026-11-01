@@ -9,10 +9,14 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/August-H/pearl-cli/internal/daemon"
+	"github.com/August-H/pearl-cli/internal/filelock"
+	"github.com/August-H/pearl-cli/internal/store"
 	"github.com/August-H/pearl-cli/openrouter_request"
 )
 
@@ -214,7 +218,7 @@ func TestDashboardModelCommandUsesPickerOnlyForBrowsing(t *testing.T) {
 		arguments            []string
 		interactive, refresh bool
 	}{
-		{nil, true, true},
+		{nil, true, false},
 		{[]string{"--refresh"}, true, true},
 		{[]string{"--list"}, false, false},
 		{[]string{"--free"}, false, false},
@@ -279,5 +283,415 @@ func TestModelRejectsBadUsage(t *testing.T) {
 		if exitCode := Run(args); exitCode != 2 {
 			t.Fatalf("Run(%v) exit=%d, want 2", args, exitCode)
 		}
+	}
+}
+
+func TestMain(m *testing.M) {
+	// Tests must not depend on what's signed in on this machine.
+	loadModelCatalogs = func(context.Context) []modelCatalog { return nil }
+	checkClaudeSignIn = func(context.Context) bool { return false }
+	// Nor may they touch its real config, or start the test binary as a refresh.
+	startModelCatalogRefresh = func() {}
+	configDirectory, err := os.MkdirTemp("", "pearl-cli-test")
+	if err != nil {
+		panic(err)
+	}
+	os.Setenv("PEARL_CONFIG_DIR", configDirectory)
+	code := m.Run()
+	os.RemoveAll(configDirectory)
+	os.Exit(code)
+}
+
+func testModelCatalogs() []modelCatalog {
+	return []modelCatalog{
+		{lab: "anthropic", provider: openrouter_request.ProviderClaude, login: "claude", connected: true,
+			models: []daemon.AgentModel{{ID: "opus", Name: "Opus 5.5"}, {ID: "haiku", Name: "Haiku 5.5"}}},
+		{lab: "openai", provider: openrouter_request.ProviderChatGPT, login: "chatgpt", connected: true,
+			models: []daemon.AgentModel{{ID: "gpt-6.1-sol", Name: "GPT-6.1 Sol"}}},
+		{lab: "google", provider: openrouter_request.ProviderAntigravity, login: "antigravity", connected: true,
+			models: []daemon.AgentModel{{ID: "gemini-3.8-flash-high", Name: "Gemini 3.8 Flash (High)"}}},
+	}
+}
+
+func useTestModelCatalogs(t *testing.T, catalogs []modelCatalog) {
+	t.Helper()
+	original := loadModelCatalogs
+	loadModelCatalogs = func(context.Context) []modelCatalog { return catalogs }
+	t.Cleanup(func() { loadModelCatalogs = original })
+}
+
+func writeModelTestSettings(t *testing.T, settings string) {
+	t.Helper()
+	directory := t.TempDir()
+	t.Setenv("PEARL_CONFIG_DIR", directory)
+	if err := os.WriteFile(filepath.Join(directory, "settings.json"), []byte(settings), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestModelMenuShowsEverySignedInLab(t *testing.T) {
+	writeModelTestSettings(t, `{"provider":"chatgpt","model":"openrouter/free","chatgpt_model":"gpt-6.1-sol"}`)
+	useTestModelCatalogs(t, testModelCatalogs())
+	picker, err := loadModelPicker(context.Background(), "gpt-6.1-sol", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var labs []string
+	for _, lab := range picker.visible {
+		labs = append(labs, lab.provider+":"+lab.name)
+	}
+	if got := strings.Join(labs, ","); got != "anthropic:2 models,openai:1 model,google:1 model" {
+		t.Fatalf("labs = %s", got)
+	}
+	current := ""
+	for _, row := range picker.rows {
+		if row.current {
+			current += row.id
+		}
+	}
+	if current != "gpt-6.1-sol" {
+		t.Fatalf("current = %q", current)
+	}
+	if picker.notice != "" {
+		t.Fatalf("notice = %q", picker.notice)
+	}
+}
+
+func TestChoosingAModelSelectsItsProviderAndHarness(t *testing.T) {
+	writeModelTestSettings(t, `{"provider":"chatgpt","model":"openrouter/free","chatgpt_model":"gpt-6.1-sol"}`)
+	rows := connectedModelRows(testModelCatalogs(), openrouter_request.ProviderChatGPT, "gpt-6.1-sol")
+	for _, test := range []struct{ id, provider, harness string }{
+		{"opus", openrouter_request.ProviderClaude, store.HarnessClaude},
+		{"gemini-3.8-flash-high", openrouter_request.ProviderAntigravity, store.HarnessAntigravity},
+		{"gpt-6.1-sol", openrouter_request.ProviderChatGPT, store.HarnessCodex},
+	} {
+		if _, err := saveModelChoice(rows, test.id); err != nil {
+			t.Fatal(err)
+		}
+		settings, err := openrouter_request.LoadAgentSettings()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if settings.Provider != test.provider || openrouter_request.AgentModel(settings) != test.id {
+			t.Fatalf("after choosing %s: provider=%s model=%s", test.id, settings.Provider, openrouter_request.AgentModel(settings))
+		}
+		if harness := daemon.DefaultHarness(); harness != test.harness {
+			t.Fatalf("after choosing %s: harness = %s, want %s", test.id, harness, test.harness)
+		}
+	}
+	// Each provider remembers its own model.
+	settings, _ := openrouter_request.LoadAgentSettings()
+	if settings.ClaudeModel != "opus" || settings.AntigravityModel != "gemini-3.8-flash-high" || settings.Model != "openrouter/free" {
+		t.Fatalf("settings = %+v", settings)
+	}
+}
+
+func TestModelSetSwitchesProviderAndRejectsUnknownModels(t *testing.T) {
+	writeModelTestSettings(t, `{"provider":"chatgpt","model":"openrouter/free","chatgpt_model":"gpt-6.1-sol"}`)
+	useTestModelCatalogs(t, testModelCatalogs())
+	if output, code := captureTestStdout(t, func() int { return Run([]string{"model", "--set", "haiku"}) }); code != 0 || !strings.Contains(output, "Model: Haiku 5.5") {
+		t.Fatalf("set = %d %q", code, output)
+	}
+	if harness := daemon.DefaultHarness(); harness != store.HarnessClaude {
+		t.Fatalf("harness = %s", harness)
+	}
+	if code := Run([]string{"model", "--set", "not-a-model"}); code == 0 {
+		t.Fatal("accepted a model no account offers")
+	}
+	if settings, _ := openrouter_request.LoadAgentSettings(); settings.ClaudeModel != "haiku" {
+		t.Fatalf("a rejected model changed the settings: %+v", settings)
+	}
+}
+
+func TestModelListPrintsEveryLab(t *testing.T) {
+	writeModelTestSettings(t, `{"provider":"claude","model":"openrouter/free","claude_model":"opus"}`)
+	useTestModelCatalogs(t, testModelCatalogs())
+	output, code := captureTestStdout(t, func() int { return Run([]string{"model", "--list"}) })
+	if code != 0 {
+		t.Fatalf("exit = %d", code)
+	}
+	for _, want := range []string{"Current: opus", "Anthropic", "* opus  Opus 5.5", "OpenAI", "gpt-6.1-sol", "Google", "gemini-3.8-flash-high"} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("missing %q:\n%s", want, output)
+		}
+	}
+}
+
+func TestModelMenuExplainsWhatIsMissing(t *testing.T) {
+	writeModelTestSettings(t, `{"provider":"chatgpt","model":"openrouter/free","chatgpt_model":"gpt-6.1-sol"}`)
+	catalogs := testModelCatalogs()
+	catalogs[0].connected, catalogs[0].models = false, nil
+	catalogs[2].models, catalogs[2].err = nil, errors.New("server down")
+	useTestModelCatalogs(t, catalogs)
+	picker, err := loadModelPicker(context.Background(), "gpt-6.1-sol", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(picker.visible) != 1 || picker.visible[0].provider != "openai" {
+		t.Fatalf("labs = %+v", picker.visible)
+	}
+	for _, want := range []string{"Couldn't load Google models: server down", "pearl auth login claude"} {
+		if !strings.Contains(picker.notice, want) {
+			t.Fatalf("notice = %q", picker.notice)
+		}
+	}
+	for index := range catalogs {
+		catalogs[index].connected, catalogs[index].models, catalogs[index].err = false, nil, nil
+	}
+	if _, err := loadModelPicker(context.Background(), "gpt-6.1-sol", true); err == nil || !strings.Contains(err.Error(), "pearl auth login claude|chatgpt|antigravity") {
+		t.Fatalf("no sign-ins error = %v", err)
+	}
+}
+
+func TestHarnessCommandAndFlagAreGone(t *testing.T) {
+	writeModelTestSettings(t, `{"provider":"chatgpt","model":"openrouter/free","chatgpt_model":"gpt-6.1-sol"}`)
+	if code := Run([]string{"harness"}); code == 0 {
+		t.Fatal("pearl harness still runs")
+	}
+	for _, job := range [][]string{
+		{"job", "--harness", "codex", "fix it"},
+		{"job", "fix it", "--harness", "codex"},
+		{"job", "fix it", "--harness=codex"},
+	} {
+		// Failing matters: after the prompt, it would silently join the prompt.
+		if code := Run(job); code == 0 {
+			t.Fatalf("pearl %v still works", job)
+		}
+	}
+	if code := runProvider([]string{"claude"}); code == 0 {
+		t.Fatal("pearl provider should point at pearl model for Claude")
+	}
+}
+
+func stubModelCatalogRefresh(t *testing.T) *int {
+	t.Helper()
+	started := 0
+	original := startModelCatalogRefresh
+	startModelCatalogRefresh = func() { started++ }
+	t.Cleanup(func() { startModelCatalogRefresh = original })
+	return &started
+}
+
+func saveTestModelCatalogs(t *testing.T, age time.Duration) {
+	t.Helper()
+	if err := saveModelCatalogs(testModelCatalogs()); err != nil {
+		t.Fatal(err)
+	}
+	path, err := modelCatalogCachePath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	contents, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var saved savedModelCatalogs
+	if err := json.Unmarshal(contents, &saved); err != nil {
+		t.Fatal(err)
+	}
+	saved.FetchedAt = time.Now().Add(-age)
+	contents, err = json.Marshal(saved)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, contents, 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func failIfModelsLoad(t *testing.T) {
+	t.Helper()
+	original := loadModelCatalogs
+	loadModelCatalogs = func(context.Context) []modelCatalog {
+		t.Error("loaded the models instead of using the saved list")
+		return nil
+	}
+	t.Cleanup(func() { loadModelCatalogs = original })
+}
+
+func TestModelPickerOpensFromTheSavedListWithoutWaiting(t *testing.T) {
+	t.Setenv("PEARL_CONFIG_DIR", t.TempDir())
+	started := stubModelCatalogRefresh(t)
+	saveTestModelCatalogs(t, time.Minute)
+	failIfModelsLoad(t)
+	picker, err := loadModelPicker(context.Background(), "", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !modelRowsInclude(picker.rows, "opus") || !modelRowsInclude(picker.rows, "gemini-3.8-flash-high") {
+		t.Fatalf("rows=%v", picker.rows)
+	}
+	if *started != 0 {
+		t.Fatalf("a recent list was checked again %d times", *started)
+	}
+}
+
+func TestModelPickerChecksAnOldListInTheBackground(t *testing.T) {
+	t.Setenv("PEARL_CONFIG_DIR", t.TempDir())
+	started := stubModelCatalogRefresh(t)
+	saveTestModelCatalogs(t, modelCatalogMaxAge+time.Minute)
+	failIfModelsLoad(t)
+	picker, err := loadModelPicker(context.Background(), "", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !modelRowsInclude(picker.rows, "opus") || *started != 1 {
+		t.Fatalf("rows=%v started=%d", picker.rows, *started)
+	}
+}
+
+func TestModelPickerWaitsWhenNothingIsSaved(t *testing.T) {
+	for name, contents := range map[string]string{
+		"missing": "", "corrupt": "{not json", "empty": `{"catalogs":[{"provider":"claude"}]}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Setenv("PEARL_CONFIG_DIR", t.TempDir())
+			started := stubModelCatalogRefresh(t)
+			if contents != "" {
+				path, err := modelCatalogCachePath()
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			useTestModelCatalogs(t, testModelCatalogs())
+			picker, err := loadModelPicker(context.Background(), "", false)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !modelRowsInclude(picker.rows, "opus") || *started != 0 {
+				t.Fatalf("rows=%v started=%d", picker.rows, *started)
+			}
+			if _, _, ok := readSavedModelCatalogs(); !ok {
+				t.Fatal("the list wasn't saved for next time")
+			}
+		})
+	}
+}
+
+func TestModelRefreshFlagWaitsForANewList(t *testing.T) {
+	t.Setenv("PEARL_CONFIG_DIR", t.TempDir())
+	saveTestModelCatalogs(t, time.Minute)
+	useTestModelCatalogs(t, []modelCatalog{{lab: "anthropic", provider: "claude", connected: true,
+		models: []daemon.AgentModel{{ID: "brand-new"}}}})
+	picker, err := loadModelPicker(context.Background(), "", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !modelRowsInclude(picker.rows, "brand-new") || modelRowsInclude(picker.rows, "opus") {
+		t.Fatalf("rows=%v", picker.rows)
+	}
+}
+
+func TestModelRefreshKeepsAListWhenACheckFails(t *testing.T) {
+	t.Setenv("PEARL_CONFIG_DIR", t.TempDir())
+	saveTestModelCatalogs(t, time.Hour)
+	useTestModelCatalogs(t, []modelCatalog{
+		{lab: "anthropic", provider: "claude", connected: true, err: errors.New("timed out")},
+		{lab: "openai", provider: "chatgpt", login: "chatgpt"},
+		{lab: "google", provider: "antigravity", connected: true, err: errors.New("no route")},
+	})
+	refreshModelCatalogs(context.Background())
+	saved, fetchedAt, ok := readSavedModelCatalogs()
+	if !ok || time.Since(fetchedAt) > time.Minute {
+		t.Fatalf("ok=%v fetchedAt=%v", ok, fetchedAt)
+	}
+	byProvider := map[string]modelCatalog{}
+	for _, catalog := range saved {
+		byProvider[catalog.provider] = catalog
+	}
+	if len(byProvider["claude"].models) != 2 || byProvider["claude"].err != nil {
+		t.Errorf("a failed check lost the list: %+v", byProvider["claude"])
+	}
+	if len(byProvider["chatgpt"].models) != 0 {
+		t.Errorf("a signed-out account kept its list: %+v", byProvider["chatgpt"])
+	}
+}
+
+func TestSavedModelListKeepsAFailureWithNoList(t *testing.T) {
+	t.Setenv("PEARL_CONFIG_DIR", t.TempDir())
+	if err := saveModelCatalogs([]modelCatalog{
+		{lab: "anthropic", provider: "claude", connected: true, models: []daemon.AgentModel{{ID: "opus"}}},
+		{lab: "google", provider: "antigravity", connected: true, err: errors.New("no route")},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	saved, _, ok := readSavedModelCatalogs()
+	if !ok || !strings.Contains(modelCatalogNotice(saved), "Couldn't load Google models: no route") {
+		t.Fatalf("ok=%v notice=%q", ok, modelCatalogNotice(saved))
+	}
+}
+
+func TestModelSetUsesTheSavedListThenChecks(t *testing.T) {
+	t.Setenv("PEARL_CONFIG_DIR", t.TempDir())
+	writeModelTestSettings(t, `{"provider":"chatgpt","model":"openai/gpt-5","chatgpt_model":"gpt-6.1-sol"}`)
+	saveTestModelCatalogs(t, time.Hour)
+	failIfModelsLoad(t)
+	if _, exitCode := captureTestStdout(t, func() int { return setModel("opus") }); exitCode != 0 {
+		t.Fatalf("exit=%d", exitCode)
+	}
+	settings, err := openrouter_request.LoadAgentSettings()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if settings.Provider != openrouter_request.ProviderClaude || settings.ClaudeModel != "opus" {
+		t.Fatalf("settings=%+v", settings)
+	}
+
+	useTestModelCatalogs(t, []modelCatalog{{lab: "anthropic", provider: "claude", connected: true,
+		models: []daemon.AgentModel{{ID: "brand-new"}}}})
+	if _, exitCode := captureTestStdout(t, func() int { return setModel("brand-new") }); exitCode != 0 {
+		t.Fatalf("a model missing from the saved list wasn't rechecked: exit=%d", exitCode)
+	}
+}
+
+func TestSigningInOrOutClearsTheSavedList(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("fake Claude Code script needs a POSIX shell")
+	}
+	script := filepath.Join(t.TempDir(), "claude")
+	if err := os.WriteFile(script, []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PEARL_CLAUDE_PATH", script)
+	for _, action := range []string{"login", "logout"} {
+		t.Setenv("PEARL_CONFIG_DIR", t.TempDir())
+		saveTestModelCatalogs(t, time.Minute)
+		captureTestStdout(t, func() int { return claudeAuthCommand(action) })
+		if _, _, ok := readSavedModelCatalogs(); ok {
+			t.Errorf("%s left the old list", action)
+		}
+	}
+}
+
+func TestModelCacheUpdateSavesAndSkipsWhenAnotherIsRunning(t *testing.T) {
+	t.Setenv("PEARL_CONFIG_DIR", t.TempDir())
+	useTestModelCatalogs(t, testModelCatalogs())
+	path, err := modelCatalogCachePath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	lock, err := os.OpenFile(path+".lock", os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lock.Close()
+	if locked, err := filelock.TryLock(lock); err != nil || !locked {
+		t.Fatalf("locked=%v err=%v", locked, err)
+	}
+	if exitCode := runModel([]string{"--update-cache"}); exitCode != 0 {
+		t.Fatalf("exit=%d", exitCode)
+	}
+	if _, _, ok := readSavedModelCatalogs(); ok {
+		t.Fatal("ran while another update held the lock")
+	}
+	filelock.Unlock(lock)
+	if exitCode := runModel([]string{"--update-cache"}); exitCode != 0 {
+		t.Fatalf("exit=%d", exitCode)
+	}
+	if _, _, ok := readSavedModelCatalogs(); !ok {
+		t.Fatal("the update didn't save the list")
 	}
 }

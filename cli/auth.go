@@ -11,15 +11,21 @@ import (
 	"time"
 
 	"github.com/August-H/pearl-cli/internal/chatgpt"
+	"github.com/August-H/pearl-cli/internal/daemon"
 	"github.com/August-H/pearl-cli/openrouter_request"
 )
 
 const authUsage = `Usage:
   pearl auth login chatgpt [--no-browser] [--new-account | --account <id>]
+  pearl auth login claude
+  pearl auth login antigravity
   pearl auth status
   pearl auth accounts
   pearl auth use <id>
-  pearl auth logout
+  pearl auth logout [claude | antigravity]
+
+Each sign-in adds its models to pearl model: GPT from ChatGPT, Claude from your
+installed Claude Code, and Gemini from your installed Antigravity server.
 
 Continue with ChatGPT to use an eligible ChatGPT plan in Pearl.
 Login uses your browser and stores credentials in Pearl's config directory.
@@ -45,6 +51,14 @@ func runAuth(args []string) int {
 	if len(args) == 0 || len(args) == 1 && (args[0] == "--help" || args[0] == "-h" || args[0] == "help") {
 		fmt.Println(authUsage)
 		return 0
+	}
+	if len(args) == 2 && (args[0] == "login" || args[0] == "logout") {
+		switch args[1] {
+		case "claude":
+			return claudeAuthCommand(args[0])
+		case "antigravity":
+			return runAntigravity(args[:1])
+		}
 	}
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer cancel()
@@ -105,6 +119,7 @@ func runAuth(args []string) int {
 		if err != nil {
 			return printError("ChatGPT", err)
 		}
+		forgetModelCatalogs()
 		if err := activateChatGPT(ctx, client); err != nil {
 			return printError("ChatGPT linked; provider setup", err)
 		}
@@ -122,6 +137,7 @@ func runAuth(args []string) int {
 		if err := client.Select(ctx, args[1]); err != nil {
 			return printError("ChatGPT", err)
 		}
+		forgetModelCatalogs()
 		if err := activateChatGPT(ctx, client); err != nil {
 			return printError("ChatGPT", err)
 		}
@@ -133,6 +149,7 @@ func runAuth(args []string) int {
 		if err := client.Logout(ctx); err != nil {
 			return printError("ChatGPT", err)
 		}
+		forgetModelCatalogs()
 		fmt.Println("Signed out of the selected ChatGPT account. Run `pearl auth login chatgpt` to reconnect.")
 		return 0
 	}
@@ -186,13 +203,22 @@ func printAuthStatus(ctx context.Context, client *chatgpt.Client, all bool) int 
 	if !found {
 		fmt.Println("ChatGPT is not connected. Run `pearl auth login chatgpt`.")
 	}
+	fmt.Println("Claude Code:", connectionStatus(checkClaudeSignIn(ctx), "claude"))
+	fmt.Println("Antigravity:", connectionStatus(daemon.AntigravitySignedIn(), "antigravity"))
 	settings, _ := openrouter_request.LoadAgentSettings()
-	fmt.Println("Provider:", openrouter_request.AgentProvider(settings))
+	fmt.Println("Billing:", billingLabel(daemon.BillingFor(openrouter_request.AgentProvider(settings))))
 	if model := openrouter_request.AgentModel(settings); model != "" {
-		fmt.Println("Model:", model)
+		fmt.Println("Model:", modelLabel(model))
 	}
 	fmt.Println("Manage usage:", chatgpt.UsageURL)
 	return 0
+}
+
+func connectionStatus(signedIn bool, login string) string {
+	if signedIn {
+		return "signed in"
+	}
+	return "not signed in. Run `pearl auth login " + login + "`."
 }
 
 func runProvider(args []string) int {
@@ -210,6 +236,9 @@ func runProvider(args []string) int {
 		return 2
 	}
 	provider := strings.ToLower(strings.TrimSpace(args[0]))
+	if provider == openrouter_request.ProviderClaude || provider == openrouter_request.ProviderAntigravity {
+		return printError("Provider", fmt.Errorf("choose a %s model with `pearl model` instead", provider))
+	}
 	if provider == openrouter_request.ProviderChatGPT {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()

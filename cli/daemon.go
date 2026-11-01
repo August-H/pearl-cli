@@ -40,7 +40,10 @@ func runDaemonCommand(args []string) int {
 		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 		defer stop()
 		fmt.Println("Pearl daemon listening at", paths.Socket)
-		runner := daemon.HarnessRunner{Pearl: daemon.OpenRouterRunner{}, Codex: daemon.CodexRunner{}}
+		runner := daemon.HarnessRunner{
+			Pearl: daemon.OpenRouterRunner{}, Codex: daemon.CodexRunner{},
+			Claude: daemon.ClaudeRunner{}, Antigravity: daemon.AntigravityRunner{},
+		}
 		if err := daemon.Run(ctx, paths, runner); err != nil {
 			return printError("Daemon", err)
 		}
@@ -176,7 +179,7 @@ func startDaemon() int {
 	if err != nil {
 		return printError("Daemon", err)
 	}
-	for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline); {
+	for deadline := time.Now().Add(20 * time.Second); time.Now().Before(deadline); {
 		ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
 		_, err := client.status(ctx)
 		cancel()

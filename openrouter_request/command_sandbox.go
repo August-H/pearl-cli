@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 
@@ -45,6 +46,9 @@ type commandSandbox struct {
 	Writable []string
 	Denied   []string
 	Network  bool
+	// Terminals lets the process open pseudo-terminals. Linux's sandbox gives
+	// each process private ones already.
+	Terminals bool
 }
 
 var errNoSandbox = errors.New("Pearl can't sandbox commands on this system; install bubblewrap (Linux), or set allow_unsandboxed_commands to true in Pearl's user settings to run them unsandboxed")
@@ -89,6 +93,39 @@ func (s commandSandbox) wrap(executable string, args []string, directory string)
 	return sandboxCommand(s, executable, args, directory)
 }
 
+// ErrNoSandbox means this system has no way to sandbox a process.
+var ErrNoSandbox = errNoSandbox
+
+// CommandPermissions are the user's settings for what agent commands may do.
+type CommandPermissions struct {
+	AllowUnsandboxed bool
+	AllowNetwork     bool
+}
+
+// LoadCommandPermissions reads them from the user's own settings only.
+func LoadCommandPermissions() (CommandPermissions, error) {
+	policy, err := loadCommandPolicy()
+	if err != nil {
+		return CommandPermissions{}, err
+	}
+	return CommandPermissions{AllowUnsandboxed: policy.AllowUnsandboxed, AllowNetwork: policy.AllowNetwork}, nil
+}
+
+// SandboxedTerminalProcess returns the program and arguments that run executable
+// in the same sandbox as agent commands, able to open a pseudo-terminal. It
+// returns ErrNoSandbox when there is none.
+func SandboxedTerminalProcess(workspace string, extraWritable []string, network bool, executable string, args []string, directory string) (string, []string, error) {
+	sandbox := newCommandSandbox(workspace, extraWritable, network)
+	sandbox.Terminals = true
+	return sandbox.wrap(executable, args, directory)
+}
+
+// StartProcessGroup starts command so that cancelling it, or calling the
+// returned function, also stops every process it started.
+func StartProcessGroup(command *exec.Cmd) (func(), error) {
+	return startCommandProcess(command)
+}
+
 func seatbeltString(value string) string {
 	value = strings.ReplaceAll(value, `\`, `\\`)
 	return `"` + strings.ReplaceAll(value, `"`, `\"`) + `"`
@@ -109,7 +146,11 @@ func seatbeltProfile(s commandSandbox) string {
 	for _, path := range s.Writable {
 		profile.WriteString("  (subpath " + seatbeltString(path) + ")\n")
 	}
-	profile.WriteString("  (literal \"/dev/null\") (literal \"/dev/zero\") (literal \"/dev/tty\") (literal \"/dev/dtracehelper\") (regex #\"^/dev/fd/\"))\n")
+	profile.WriteString("  (literal \"/dev/null\") (literal \"/dev/zero\") (literal \"/dev/tty\") (literal \"/dev/dtracehelper\") (regex #\"^/dev/fd/\")")
+	if s.Terminals {
+		profile.WriteString(" (literal \"/dev/ptmx\") (regex #\"^/dev/ttys[0-9]+$\")")
+	}
+	profile.WriteString(")\n")
 	if len(s.Denied) > 0 {
 		profile.WriteString("(deny file-read* file-write*\n")
 		for _, path := range s.Denied {

@@ -19,7 +19,6 @@ import (
 	"time"
 
 	"github.com/August-H/pearl-cli/internal/chatgpt"
-	"github.com/August-H/pearl-cli/internal/codexinstall"
 	"github.com/August-H/pearl-cli/internal/store"
 	"github.com/August-H/pearl-cli/internal/verification"
 	"github.com/August-H/pearl-cli/internal/workspacepath"
@@ -56,18 +55,18 @@ type codexThreadStore interface {
 	EventsOfType(ctx context.Context, jobID, eventType string) ([]store.Event, error)
 }
 
-// FindCodex locates the Codex CLI, preferring the copy Pearl installs. The
-// daemon may run with a minimal PATH, so common install locations are checked
-// as well.
+// ErrCodexNotInstalled means this machine has no Codex CLI. Pearl doesn't install
+// it, so the Codex harness uses the one you install yourself.
+var ErrCodexNotInstalled = errors.New("Codex isn't installed; Pearl uses your own Codex CLI, so install it with `npm install -g @openai/codex`")
+
+// FindCodex locates the installed Codex CLI. The daemon may run with a minimal
+// PATH, so common install locations are checked as well.
 func FindCodex() (string, error) {
 	if path := strings.TrimSpace(os.Getenv(codexPathEnvironment)); path != "" {
-		return path, nil
-	}
-	if path := codexinstall.Path(); path != "" {
-		return path, nil
+		return realCodexPath(path), nil
 	}
 	if path, err := exec.LookPath("codex"); err == nil {
-		return path, nil
+		return realCodexPath(path), nil
 	}
 	candidates := []string{"/opt/homebrew/bin/codex", "/usr/local/bin/codex"}
 	if home, err := os.UserHomeDir(); err == nil {
@@ -79,10 +78,20 @@ func FindCodex() (string, error) {
 	}
 	for _, candidate := range candidates {
 		if info, err := os.Stat(candidate); err == nil && !info.IsDir() {
-			return candidate, nil
+			return realCodexPath(candidate), nil
 		}
 	}
-	return "", errors.New("Codex is not installed; run `pearl codex install`")
+	return "", ErrCodexNotInstalled
+}
+
+// realCodexPath follows links. Codex's installer links to a release under ~/.codex,
+// and Codex restarts itself by the path it was given: through the link, the sandbox
+// blocks that, because the link's target goes through ~/.codex.
+func realCodexPath(path string) string {
+	if resolved, err := filepath.EvalSymlinks(path); err == nil {
+		return resolved
+	}
+	return path
 }
 
 func (r CodexRunner) Run(
@@ -138,26 +147,16 @@ func (r CodexRunner) Run(
 	ctx, cancel := context.WithTimeout(ctx, maxDuration)
 	defer cancel()
 
-	threadID, answer, err := codexResumeState(ctx, job, state)
+	threadID, answer, err := codexResumeState(ctx, job, state, codexThreadEvent)
 	if err != nil {
 		return "", err
 	}
-	prompt := job.Prompt
+	prompt := resumePrompt(job, threadID, answer)
 	var transcript []codexTranscriptMessage
 	if threadID != "" {
 		if saved, err := state.LoadTranscript(ctx, job.ID); err == nil && len(saved) > 0 {
 			_ = json.Unmarshal(saved, &transcript)
 		}
-	}
-	switch {
-	case answer != "" && threadID != "":
-		prompt = answer
-	case answer != "" && strings.HasPrefix(job.InputToolCallID, store.FollowUpIDPrefix):
-		prompt = job.Prompt + "\n\nFollow-up from the user: " + answer
-	case answer != "":
-		prompt = job.Prompt + "\n\nYour earlier question was answered: " + answer
-	case threadID != "":
-		prompt = codexContinuePrompt
 	}
 	if answer != "" && events != nil {
 		if err := events(openrouter_request.AgentEvent{
@@ -273,26 +272,43 @@ func (r CodexRunner) Run(
 	return parser.lastAnswer, nil
 }
 
-// codexResumeState returns the Codex session to resume, if any, and the user's
-// answer to a question Codex asked that has not been sent to Codex yet.
+// resumePrompt returns what to send a CLI agent, given the session it can
+// resume, if any, and an answer it hasn't seen yet.
+func resumePrompt(job store.Job, threadID, answer string) string {
+	switch {
+	case answer != "" && threadID != "":
+		return answer
+	case answer != "" && strings.HasPrefix(job.InputToolCallID, store.FollowUpIDPrefix):
+		return job.Prompt + "\n\nFollow-up from the user: " + answer
+	case answer != "":
+		return job.Prompt + "\n\nYour earlier question was answered: " + answer
+	case threadID != "":
+		return codexContinuePrompt
+	}
+	return job.Prompt
+}
+
+// codexResumeState returns the CLI session to resume, if any, and the user's
+// answer to a question the agent asked that it has not been sent yet. Sessions
+// are saved as events of sessionEvent, which differs per harness.
 func codexResumeState(
 	ctx context.Context,
 	job store.Job,
 	state openrouter_request.CheckpointStore,
+	sessionEvent string,
 ) (threadID, answer string, err error) {
 	threads, ok := state.(codexThreadStore)
 	if !ok {
 		return "", "", nil
 	}
-	previous, err := threads.EventsOfType(ctx, job.ID, codexThreadEvent)
+	previous, err := threads.EventsOfType(ctx, job.ID, sessionEvent)
 	if err != nil {
-		return "", "", fmt.Errorf("load Codex session: %w", err)
+		return "", "", fmt.Errorf("load agent session: %w", err)
 	}
 	if len(previous) > 0 {
 		threadID = previous[len(previous)-1].Data
 	}
-	if !strings.HasPrefix(job.InputToolCallID, codexQuestionIDPrefix) &&
-		!strings.HasPrefix(job.InputToolCallID, store.FollowUpIDPrefix) {
+	if job.InputToolCallID == "" {
 		return threadID, "", nil
 	}
 	response, found, err := state.LoadUserInputResponse(ctx, job.ID, job.InputToolCallID)
@@ -428,20 +444,13 @@ func codexPermissionArguments() []string {
 		// fall back to read-only.
 		arguments = append(arguments, "-c", `sandbox_mode="workspace-write"`)
 	} else {
-		entries := make([]string, 0, len(denied)+2)
+		entries := make([]string, 0, len(denied)+1)
 		for _, path := range denied {
 			entries = append(entries, codexTOMLString(path)+`="deny"`)
 		}
-		// Commands must still be able to run Pearl's Codex and read skills.
-		var readable []string
-		if directory, err := codexinstall.Directory(); err == nil {
-			readable = append(readable, directory)
-		}
+		// Commands must still be able to read skills.
 		if directory, err := openrouter_request.SkillsDirectory(); err == nil {
-			readable = append(readable, directory)
-		}
-		for _, path := range readable {
-			entries = append(entries, codexTOMLString(workspacepath.CanonicalPath(path))+`="read"`)
+			entries = append(entries, codexTOMLString(workspacepath.CanonicalPath(directory))+`="read"`)
 		}
 		arguments = append(arguments,
 			"-c", `default_permissions="pearl"`,
@@ -724,7 +733,7 @@ func (p *codexEventParser) recordTool(
 		return err
 	}
 	if err := p.state.SaveToolResult(p.ctx, p.job.ID, callID, name, arguments, result); err != nil {
-		return fmt.Errorf("save Codex tool result: %w", err)
+		return fmt.Errorf("save tool result: %w", err)
 	}
 	call := codexTranscriptCall{ID: callID, Type: "function"}
 	call.Function.Name = name
@@ -787,6 +796,11 @@ func codexDisplayCommand(command string) string {
 
 func codexRelativePath(workspace, path string) string {
 	if relative, err := filepath.Rel(workspace, path); err == nil &&
+		relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+		return filepath.ToSlash(relative)
+	}
+	// The agent may report the resolved path of a workspace reached by a symlink.
+	if relative, err := filepath.Rel(workspacepath.CanonicalPath(workspace), workspacepath.CanonicalPath(path)); err == nil &&
 		relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
 		return filepath.ToSlash(relative)
 	}

@@ -162,10 +162,10 @@ func buildJobViewSections(details jobDetails) ([]jobViewSection, error) {
 	overview = append(overview, "Directory: "+jobViewText(displayJobDirectory(job.WorkspaceRoot)))
 	overview = append(overview, "Harness: "+jobViewHarness(job))
 	if job.Provider != "" {
-		overview = append(overview, "Provider: "+job.Provider)
+		overview = append(overview, "Billing: "+billingLabel(job.Provider))
 	}
 	if job.Model != "" {
-		overview = append(overview, "Model: "+job.Model)
+		overview = append(overview, "Model: "+modelLabel(job.Model))
 	}
 	overview = append(overview, "Tests: "+jobVerificationLabel(job))
 	if job.VerificationCommand != "" {
@@ -262,9 +262,9 @@ func buildJobViewSections(details jobDetails) ([]jobViewSection, error) {
 func jobViewHarness(job store.Job) string {
 	switch {
 	case job.Harness != "":
-		return job.Harness
+		return harnessLabel(job.Harness)
 	case job.StartedAt != nil:
-		return store.HarnessPearl
+		return harnessLabel(store.HarnessPearl)
 	default:
 		return "default"
 	}

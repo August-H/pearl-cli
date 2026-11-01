@@ -16,13 +16,13 @@ func jobVerificationLabel(job store.Job) string {
 func jobRunDetails(job store.Job) string {
 	var parts []string
 	if job.Provider != "" {
-		parts = append(parts, job.Provider)
+		parts = append(parts, billingLabel(job.Provider))
 	}
 	if job.Model != "" {
-		parts = append(parts, job.Model)
+		parts = append(parts, modelLabel(job.Model))
 	}
 	if job.Harness != "" {
-		parts = append(parts, "Harness: "+job.Harness)
+		parts = append(parts, "Harness: "+harnessLabel(job.Harness))
 	}
 	parts = append(parts, "Tests: "+jobVerificationLabel(job))
 	return dashboardText(strings.Join(parts, " · "))

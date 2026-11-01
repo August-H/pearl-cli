@@ -171,11 +171,9 @@ func (m *Manager) runJob(parent context.Context, job store.Job) {
 		return err
 	}
 	if settings, err := openrouter_request.LoadAgentSettings(); err == nil {
-		harness := job.Harness
-		if harness == "" {
-			harness = DefaultHarness()
-		}
-		data, _ := json.Marshal(map[string]string{"provider": openrouter_request.AgentProvider(settings), "model": openrouter_request.AgentModel(settings), "harness": harness})
+		harness := resolveJobHarness(job)
+		provider, model := harnessBilling(harness, settings)
+		data, _ := json.Marshal(map[string]string{"provider": provider, "model": model, "harness": harness})
 		if err := events(openrouter_request.AgentEvent{Type: "run_config", Data: string(data)}); err != nil {
 			m.finishJob(job.ID, store.JobFailed, "", err.Error())
 			return

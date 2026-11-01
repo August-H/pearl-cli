@@ -12,8 +12,10 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
+	"github.com/August-H/pearl-cli/internal/filelock"
 	"github.com/August-H/pearl-cli/internal/pearlpaths"
 	"github.com/August-H/pearl-cli/internal/store"
 	"github.com/August-H/pearl-cli/internal/workspacepath"
@@ -32,7 +34,6 @@ type submitRequest struct {
 	Name          string `json:"name"`
 	Prompt        string `json:"prompt"`
 	WorkspaceRoot string `json:"workspace_root"`
-	Harness       string `json:"harness"`
 	Folder        string `json:"folder"`
 }
 
@@ -75,6 +76,20 @@ func Run(ctx context.Context, paths pearlpaths.Paths, runner AgentRunner) error 
 	if err := pearlpaths.Ensure(paths); err != nil {
 		return fmt.Errorf("create Pearl runtime directory: %w", err)
 	}
+	// Check first so `pearl daemon run` says so at once when a daemon is up.
+	if socketInUse(paths.Socket) {
+		return fmt.Errorf("Pearl daemon is already running at %s", paths.Socket)
+	}
+	release, err := acquireDaemonLock(ctx, filepath.Join(paths.Directory, "daemon.lock"), daemonLockWait)
+	if err != nil {
+		return err
+	}
+	// Released last: holding the lock is what makes the socket this daemon's to
+	// delete, and it keeps a second daemon away from the database.
+	defer release()
+	// Earlier versions downloaded their own copy of Codex here. It's about 300 MB
+	// and nothing uses it now. Holding the lock means no job is running from it.
+	_ = os.RemoveAll(filepath.Join(paths.Directory, "codex"))
 	listener, err := listenUnix(paths.Socket)
 	if err != nil {
 		return err
@@ -130,9 +145,57 @@ func Run(ctx context.Context, paths pearlpaths.Paths, runner AgentRunner) error 
 	return nil
 }
 
-func listenUnix(socketPath string) (net.Listener, error) {
-	if connection, err := net.DialTimeout("unix", socketPath, 250*time.Millisecond); err == nil {
+// daemonLockWait covers a restart, when the old daemon stops answering before it
+// has finished stopping its worker.
+const daemonLockWait = 15 * time.Second
+
+// acquireDaemonLock makes this process the only daemon for its config folder.
+// The operating system drops the lock if the process dies, so it can't go stale.
+func acquireDaemonLock(ctx context.Context, path string, wait time.Duration) (func(), error) {
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return nil, fmt.Errorf("open daemon lock: %w", err)
+	}
+	for deadline := time.Now().Add(wait); ; {
+		locked, err := filelock.TryLock(file)
+		if err != nil {
+			_ = file.Close()
+			return nil, fmt.Errorf("lock daemon: %w", err)
+		}
+		if locked {
+			return func() {
+				filelock.Unlock(file)
+				_ = file.Close()
+			}, nil
+		}
+		if time.Now().After(deadline) {
+			_ = file.Close()
+			return nil, errors.New("another Pearl daemon is running for this config folder")
+		}
+		select {
+		case <-ctx.Done():
+			_ = file.Close()
+			return nil, ctx.Err()
+		case <-time.After(100 * time.Millisecond):
+		}
+	}
+}
+
+// socketInUse reports whether something may be listening on the socket. Only a
+// refused connection or a missing file proves nothing is. A slow connection
+// means a busy daemon, whose socket must not be replaced.
+func socketInUse(socketPath string) bool {
+	connection, err := net.DialTimeout("unix", socketPath, 250*time.Millisecond)
+	if err == nil {
 		_ = connection.Close()
+		return true
+	}
+	var networkError net.Error
+	return errors.As(err, &networkError) && networkError.Timeout() || errors.Is(err, syscall.EAGAIN)
+}
+
+func listenUnix(socketPath string) (net.Listener, error) {
+	if socketInUse(socketPath) {
 		return nil, fmt.Errorf("Pearl daemon is already running at %s", socketPath)
 	}
 	if info, err := os.Lstat(socketPath); err == nil {
@@ -298,18 +361,8 @@ func (s *Server) handleJobs(writer http.ResponseWriter, request *http.Request) {
 			writeError(writer, http.StatusBadRequest, err)
 			return
 		}
-		harness, err := store.NormalizeHarness(input.Harness)
-		if err != nil {
-			writeError(writer, http.StatusBadRequest, err)
-			return
-		}
-		if harness == store.HarnessCodex {
-			if _, err := FindCodex(); err != nil {
-				writeError(writer, http.StatusBadRequest, err)
-				return
-			}
-		}
 		var job store.Job
+		var err error
 		if folderName := strings.TrimSpace(input.Folder); folderName != "" {
 			folder, folderErr := s.store.GetFolder(request.Context(), folderName)
 			if folderErr != nil {
@@ -321,7 +374,7 @@ func (s *Server) handleJobs(writer http.ResponseWriter, request *http.Request) {
 				return
 			}
 			job, err = s.store.CreatePendingFolderJob(
-				request.Context(), input.Name, input.Prompt, harness, folder.Name,
+				request.Context(), input.Name, input.Prompt, "", folder.Name,
 			)
 		} else {
 			var workspace string
@@ -331,7 +384,7 @@ func (s *Server) handleJobs(writer http.ResponseWriter, request *http.Request) {
 				return
 			}
 			job, err = s.store.CreatePendingJob(
-				request.Context(), input.Name, input.Prompt, workspace, harness,
+				request.Context(), input.Name, input.Prompt, workspace, "",
 			)
 		}
 		if err != nil {

@@ -353,11 +353,19 @@ func TestRenderDashboardShowsCommandPromptAndNotice(t *testing.T) {
 			t.Fatalf("dashboard still shows the idle hint %q:\n%s", unwanted, output)
 		}
 	}
+	t.Setenv("TERM_PROGRAM", "ghostty")
 	idle := renderDashboardWithInput(
 		nil, time.Date(2026, time.August, 19, 12, 30, 0, 0, time.UTC), 80, false, nil, "", "",
 	)
-	if !strings.Contains(idle, "Ctrl+E editor") || !strings.Contains(idle, "Alt+Enter newline") {
+	if !strings.Contains(idle, "Ctrl+E editor") || !strings.Contains(idle, "Shift+Enter newline") {
 		t.Fatalf("idle dashboard does not explain draft editing:\n%s", idle)
+	}
+	t.Setenv("TERM_PROGRAM", "Apple_Terminal")
+	idle = renderDashboardWithInput(
+		nil, time.Date(2026, time.August, 19, 12, 30, 0, 0, time.UTC), 80, false, nil, "", "",
+	)
+	if !strings.Contains(idle, "Ctrl+J newline") || strings.Contains(idle, "Shift+Enter") {
+		t.Fatalf("macOS Terminal can't send Shift+Enter, so don't suggest it:\n%s", idle)
 	}
 }
 
@@ -396,14 +404,14 @@ func TestRenderDashboardComposerShowsModelBelowInputBox(t *testing.T) {
 			dashboardConfigureInactive, false, "anthropic/claude-opus-5.5", "", 0, 0, 0, true)
 		lines := strings.Split(strings.TrimRight(output, "\n"), "\n")
 		modelLine := lines[len(lines)-2]
-		if modelLine != "  Default model: anthropic/claude-opus-5.5" || !strings.Contains(lines[len(lines)-3], "╯") {
+		if modelLine != "  Model: anthropic/claude-opus-5.5" || !strings.Contains(lines[len(lines)-3], "╯") {
 			t.Fatalf("color %v: model line is not plain text below the box:\n%q", color, lines)
 		}
 	}
 	output := renderDashboardComposer(nil, "", "", 80, false, 0, false,
 		dashboardConfigureInactive, false, "openrouter/free", "codex", 0, 0, 0, true)
 	lines := strings.Split(strings.TrimRight(output, "\n"), "\n")
-	if last := lines[len(lines)-2]; last != "  Default model: openrouter/free · Default harness: codex" {
+	if last := lines[len(lines)-2]; last != "  Model: openrouter/free · Harness: Codex" {
 		t.Fatalf("model and harness line = %q", last)
 	}
 }
@@ -458,12 +466,11 @@ func TestDashboardCommandSuggestionsFilterNavigateAndFill(t *testing.T) {
 		t.Fatalf("filling a detached run item returned %q", got)
 	}
 	jobItems := dashboardCommandSuggestions("job ")
-	if len(jobItems) != 5 || jobItems[0].usage != "<prompt>" ||
+	if len(jobItems) != 4 || jobItems[0].usage != "<prompt>" ||
 		jobItems[0].description != "Create a job in the current directory" ||
 		jobItems[1].usage != "<prompt> -n <name>" ||
 		jobItems[2].usage != "<prompt> [-n name] --directory" ||
-		jobItems[3].usage != "<prompt> --harness codex" ||
-		jobItems[4].usage != "<prompt> --folder <name>" {
+		jobItems[3].usage != "<prompt> --folder <name>" {
 		t.Fatalf("dashboardCommandSuggestions(\"job \") = %#v", jobItems)
 	}
 	if got := dashboardFillSuggestion("job ", 2); got != "job " {
@@ -1078,5 +1085,154 @@ func TestDashboardFrameNeverOutgrowsTheTerminal(t *testing.T) {
 	}
 	if got := dashboardFitHeight("a\nb\n", 5); got != "a\nb" {
 		t.Fatalf("short frame = %q", got)
+	}
+}
+
+func TestDashboardSuggestsTheClaudeAndAntigravityCommands(t *testing.T) {
+	usages := func(input string) string {
+		var found []string
+		for _, suggestion := range dashboardCommandSuggestions(input) {
+			found = append(found, suggestion.usage)
+		}
+		return strings.Join(found, "\n")
+	}
+	if top := usages("anti"); !strings.Contains(top, "antigravity") {
+		t.Fatalf("top-level suggestions = %q", top)
+	}
+	if top := usages("cla"); !strings.Contains(top, "claude") {
+		t.Fatalf("top-level suggestions = %q", top)
+	}
+	for input, want := range map[string][]string{
+		"antigravity ": {"login", "logout"},
+		"claude ":      {"login", "logout"},
+		"auth login ":  {"chatgpt", "claude", "antigravity"},
+	} {
+		items := usages(input)
+		for _, item := range want {
+			if !strings.Contains(items, item) {
+				t.Errorf("suggestions for %q = %q, missing %q", input, items, item)
+			}
+		}
+	}
+	for _, command := range []string{"claude", "antigravity"} {
+		if _, known := dashboardCommandDescriptions[command]; !known {
+			t.Errorf("the dashboard would reject %q", command)
+		}
+	}
+	if _, known := dashboardCommandDescriptions["harness"]; known {
+		t.Error("the harness command should be gone")
+	}
+}
+
+func numberedBody(count int) string {
+	var body strings.Builder
+	for line := 1; line <= count; line++ {
+		fmt.Fprintf(&body, "line %d\n", line)
+	}
+	return body.String()
+}
+
+func TestDashboardBodyScrollShowsTheBottomThenScrollsUp(t *testing.T) {
+	var scroll dashboardBodyScroll
+	composer := "input\nstatus\n"
+	frame := scroll.fit(numberedBody(30), composer, 80, 10, false)
+	lines := strings.Split(frame, "\n")
+	if len(lines) != 10 {
+		t.Fatalf("frame has %d lines:\n%s", len(lines), frame)
+	}
+	if lines[0] != "line 24" || lines[6] != "line 30" || lines[8] != "input" || lines[9] != "status" {
+		t.Fatalf("frame =\n%s", frame)
+	}
+	if !strings.Contains(lines[7], "↑ 23 above") || strings.Contains(lines[7], "below") || !strings.Contains(lines[7], "PgUp") {
+		t.Fatalf("hint = %q", lines[7])
+	}
+
+	if !scroll.apply("scroll_up") {
+		t.Fatal("the wheel didn't scroll")
+	}
+	lines = strings.Split(scroll.fit(numberedBody(30), composer, 80, 10, false), "\n")
+	if lines[0] != "line 21" || !strings.Contains(lines[7], "↓ 3 below") || lines[8] != "input" {
+		t.Fatalf("after the wheel: %q", lines)
+	}
+
+	scroll.apply("home")
+	lines = strings.Split(scroll.fit(numberedBody(30), composer, 80, 10, false), "\n")
+	if lines[0] != "line 1" || strings.Contains(lines[7], "above") {
+		t.Fatalf("after home: %q", lines)
+	}
+	scroll.apply("scroll_up")
+	if scroll.offset != 23 {
+		t.Fatalf("scrolled past the top: %d", scroll.offset)
+	}
+
+	scroll.apply("page_down")
+	lines = strings.Split(scroll.fit(numberedBody(30), composer, 80, 10, false), "\n")
+	if lines[0] != "line 7" {
+		t.Fatalf("after page down: %q", lines)
+	}
+
+	scroll.apply("end")
+	lines = strings.Split(scroll.fit(numberedBody(30), composer, 80, 10, false), "\n")
+	if lines[6] != "line 30" {
+		t.Fatalf("after end: %q", lines)
+	}
+	scroll.apply("scroll_down")
+	if scroll.offset != 0 {
+		t.Fatalf("scrolled past the bottom: %d", scroll.offset)
+	}
+	if scroll.apply("previous") || scroll.apply("") {
+		t.Fatal("arrow keys must stay with history and suggestions")
+	}
+}
+
+func TestDashboardBodyScrollFollowsNewOutputUnlessScrolledUp(t *testing.T) {
+	var scroll dashboardBodyScroll
+	composer := "input\n"
+	scroll.fit(numberedBody(30), composer, 80, 10, false)
+	lines := strings.Split(scroll.fit(numberedBody(40), composer, 80, 10, false), "\n")
+	if lines[7] != "line 40" {
+		t.Fatalf("at the bottom, new output should stay in view: %q", lines)
+	}
+	scroll.apply("page_up")
+	before := strings.Split(scroll.fit(numberedBody(40), composer, 80, 10, false), "\n")
+	after := strings.Split(scroll.fit(numberedBody(55), composer, 80, 10, false), "\n")
+	if before[0] != after[0] || before[7] != after[7] {
+		t.Fatalf("new output moved what you were reading:\n%q\n%q", before, after)
+	}
+	scroll.toBottom()
+	lines = strings.Split(scroll.fit(numberedBody(55), composer, 80, 10, false), "\n")
+	if lines[7] != "line 55" {
+		t.Fatalf("a new command should go back to the bottom: %q", lines)
+	}
+}
+
+func TestDashboardBodyScrollFitsShortAndTinyScreens(t *testing.T) {
+	var scroll dashboardBodyScroll
+	frame := scroll.fit(numberedBody(3), "input\n", 80, 10, false)
+	if frame != "line 1\nline 2\nline 3\ninput" {
+		t.Fatalf("short frame = %q", frame)
+	}
+	scroll.apply("scroll_up")
+	if scroll.offset != 0 {
+		t.Fatalf("nothing to scroll, offset = %d", scroll.offset)
+	}
+	frame = scroll.fit(numberedBody(30), "a\nb\nc\n", 80, 4, false)
+	if !strings.HasSuffix(frame, "a\nb\nc") || len(strings.Split(frame, "\n")) != 4 {
+		t.Fatalf("tiny frame = %q", frame)
+	}
+	if frame = scroll.fit(numberedBody(3), "input\n", 80, 0, false); !strings.HasSuffix(frame, "input") {
+		t.Fatalf("no height = %q", frame)
+	}
+}
+
+func TestDashboardPartsMakeTheSameScreen(t *testing.T) {
+	view := dashboardCommandView{command: "help", output: numberedBody(5), model: "x", harness: "codex"}
+	now := time.Date(2026, time.August, 19, 12, 30, 0, 0, time.UTC)
+	body, composer := renderDashboardParts(nil, now, 80, false, nil, "", "", 0, view)
+	if whole := renderDashboardState(nil, now, 80, false, nil, "", "", 0, view); whole != body+composer {
+		t.Fatal("the parts don't add up to the dashboard")
+	}
+	if strings.Contains(body, "Harness:") || !strings.Contains(body, "line 5") || !strings.Contains(composer, "Harness:") {
+		t.Fatalf("body=%q composer=%q", body, composer)
 	}
 }

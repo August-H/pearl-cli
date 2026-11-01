@@ -9,7 +9,6 @@ import (
 	"io"
 	"net/http"
 	"os"
-	"path/filepath"
 	"runtime"
 	"strings"
 	"sync"
@@ -511,29 +510,6 @@ func TestInteractiveConfigureSelectsFreeOrCustomModel(t *testing.T) {
 	}
 }
 
-func TestJobCommandAcceptsAHarness(t *testing.T) {
-	client := startTestDaemon(t, &userInputRunner{})
-	fakeCodex := filepath.Join(t.TempDir(), "codex")
-	if err := os.WriteFile(fakeCodex, []byte("#!/bin/sh\n"), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("PEARL_CODEX_PATH", fakeCodex)
-	output, exitCode := captureTestStdout(t, func() int {
-		return Run([]string{"job", "fix", "the", "tests", "--harness", "codex", "-n", "codex job"})
-	})
-	if exitCode != 0 || !strings.Contains(output, "Harness: codex") {
-		t.Fatalf("job exit=%d output=%q", exitCode, output)
-	}
-	job, err := client.job(context.Background(), "codex job")
-	if err != nil || job.Harness != store.HarnessCodex || job.Prompt != "fix the tests" {
-		t.Fatalf("created job = %#v, err=%v", job, err)
-	}
-
-	if exitCode := Run([]string{"job", "nope", "--harness", "claude"}); exitCode == 0 {
-		t.Fatal("an unknown harness was accepted")
-	}
-}
-
 func TestJobCommandCreatesNamedDetachedJob(t *testing.T) {
 	client := startTestDaemon(t, &userInputRunner{})
 	output, exitCode := captureTestStdout(t, func() int {
@@ -1002,7 +978,7 @@ func TestHelpTopicsPrintToStdout(t *testing.T) {
 
 func TestHelpNeverRunsASubcommand(t *testing.T) {
 	for _, topic := range [][]string{
-		{"help", "codex", "install"}, {"help", "folder", "create"}, {"help", "a", "b", "c"},
+		{"help", "auth", "logout"}, {"help", "folder", "create"}, {"help", "a", "b", "c"},
 	} {
 		errorOutput, exitCode := captureTestStderr(t, func() int { return Run(topic) })
 		if exitCode != 2 || !strings.Contains(errorOutput, "Usage: pearl help") {

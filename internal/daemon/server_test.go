@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -328,4 +329,152 @@ func socketTempDir(t *testing.T, prefix string) string {
 	}
 	t.Cleanup(func() { _ = os.RemoveAll(directory) })
 	return directory
+}
+
+func TestOnlyOneDaemonCanRunForAConfigFolder(t *testing.T) {
+	lock := filepath.Join(t.TempDir(), "daemon.lock")
+	release, err := acquireDaemonLock(context.Background(), lock, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := acquireDaemonLock(context.Background(), lock, 150*time.Millisecond); err == nil || !strings.Contains(err.Error(), "another Pearl daemon") {
+		t.Fatalf("second lock = %v", err)
+	}
+	release()
+	again, err := acquireDaemonLock(context.Background(), lock, 0)
+	if err != nil {
+		t.Fatalf("lock after release = %v", err)
+	}
+	again()
+}
+
+func TestDaemonLockWaitsForTheOldDaemonToFinish(t *testing.T) {
+	lock := filepath.Join(t.TempDir(), "daemon.lock")
+	release, err := acquireDaemonLock(context.Background(), lock, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	go func() {
+		time.Sleep(200 * time.Millisecond)
+		release()
+	}()
+	next, err := acquireDaemonLock(context.Background(), lock, 5*time.Second)
+	if err != nil {
+		t.Fatalf("restart couldn't take over: %v", err)
+	}
+	next()
+}
+
+func TestSocketThatNothingServesIsStaleAndALiveOneIsNot(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows reports stale sockets differently")
+	}
+	directory, err := os.MkdirTemp("", "pearl-sock")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(directory)
+	socket := filepath.Join(directory, "s.sock")
+	if socketInUse(socket) {
+		t.Fatal("a missing socket counts as in use")
+	}
+	listener, err := listenUnix(socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !socketInUse(socket) {
+		t.Fatal("a live socket counts as stale")
+	}
+	if _, err := listenUnix(socket); err == nil {
+		t.Fatal("replaced a live socket")
+	}
+	if _, err := os.Stat(socket); err != nil {
+		t.Fatalf("the live socket was deleted: %v", err)
+	}
+	unixListener := listener.(*net.UnixListener)
+	unixListener.SetUnlinkOnClose(false)
+	_ = listener.Close()
+	if socketInUse(socket) {
+		t.Fatal("a socket nothing serves counts as in use")
+	}
+	replacement, err := listenUnix(socket)
+	if err != nil {
+		t.Fatalf("couldn't replace a stale socket: %v", err)
+	}
+	_ = replacement.Close()
+}
+
+// The bug this guards against: an old daemon that outlived its socket deleted a
+// newer daemon's socket on exit, leaving that daemon running but unreachable.
+func TestASecondDaemonFailsWithoutTouchingTheFirst(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("needs Unix sockets at a short path")
+	}
+	directory, err := os.MkdirTemp("", "pearl-two")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(directory)
+	paths := pearlpaths.Paths{
+		Directory: directory, Database: filepath.Join(directory, "pearl.db"),
+		Socket: filepath.Join(directory, "s.sock"), Log: filepath.Join(directory, "pearl.log"),
+		Goal: filepath.Join(directory, "goal.json"),
+	}
+	first, stopFirst := context.WithCancel(context.Background())
+	defer stopFirst()
+	firstDone := make(chan error, 1)
+	go func() { firstDone <- Run(first, paths, HarnessRunner{}) }()
+	for deadline := time.Now().Add(5 * time.Second); !socketInUse(paths.Socket); {
+		if time.Now().After(deadline) {
+			t.Fatal("the first daemon didn't start")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	second := Run(context.Background(), paths, HarnessRunner{})
+	if second == nil || !strings.Contains(second.Error(), "already running") {
+		t.Fatalf("second daemon = %v", second)
+	}
+	if !socketInUse(paths.Socket) {
+		t.Fatal("the second daemon broke the first one's socket")
+	}
+	stopFirst()
+	if err := <-firstDone; err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(paths.Socket); !os.IsNotExist(err) {
+		t.Fatalf("the owner left its socket behind: %v", err)
+	}
+}
+
+// Earlier versions kept a downloaded copy of Codex in the config folder.
+func TestDaemonStartDeletesTheOldCodexCopyAndNothingElse(t *testing.T) {
+	runtimeDirectory := socketTempDir(t, "pearl-daemon-test-")
+	paths := pearlpaths.Paths{
+		Directory: runtimeDirectory,
+		Database:  filepath.Join(runtimeDirectory, "pearl.db"),
+		Socket:    filepath.Join(runtimeDirectory, "pearl.sock"),
+		Log:       filepath.Join(runtimeDirectory, "pearl.log"),
+	}
+	oldCopy := filepath.Join(runtimeDirectory, "codex", "0.159.0", "bin")
+	if err := os.MkdirAll(oldCopy, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	settings := filepath.Join(runtimeDirectory, "settings.json")
+	if err := os.WriteFile(settings, []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	result := make(chan error, 1)
+	go func() { result <- Run(ctx, paths, &serialTestRunner{}) }()
+	defer func() {
+		cancel()
+		<-result
+	}()
+	waitForDaemon(t, unixHTTPClient(paths.Socket))
+	if _, err := os.Stat(filepath.Join(runtimeDirectory, "codex")); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("the old copy is still there: %v", err)
+	}
+	if _, err := os.Stat(settings); err != nil {
+		t.Errorf("settings were removed: %v", err)
+	}
 }

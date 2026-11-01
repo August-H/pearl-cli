@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -36,6 +37,9 @@ func TestChatGPTProviderUsesAccountModelsAndKeepsOpenRouterSettings(t *testing.T
 	if settings.Provider != "chatgpt" || settings.ChatGPTModel != "account-model" || settings.Model != "openrouter/saved" {
 		t.Fatal("provider did not select account model independently")
 	}
+	original := loadModelCatalogs
+	loadModelCatalogs = func(ctx context.Context) []modelCatalog { return []modelCatalog{loadChatGPTCatalog(ctx)} }
+	t.Cleanup(func() { loadModelCatalogs = original })
 	output, code := captureTestStdout(t, func() int { return runModel([]string{"--list"}) })
 	if code != 0 {
 		t.Errorf("models exit=%d", code)

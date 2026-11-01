@@ -6,7 +6,8 @@ type Settings struct {
 	Model                     string   `json:"model"`
 	Provider                  string   `json:"provider,omitempty"`
 	ChatGPTModel              string   `json:"chatgpt_model,omitempty"`
-	Harness                   string   `json:"harness,omitempty"`
+	ClaudeModel               string   `json:"claude_model,omitempty"`
+	AntigravityModel          string   `json:"antigravity_model,omitempty"`
 	Max_concurrency           int      `json:"max_concurrency"`
 	Max_depth                 int      `json:"max_depth"`
 	Mode                      string   `json:"mode"`

@@ -176,6 +176,12 @@ func Run(ctx context.Context, prompt string, options RunOptions) (string, error)
 		return "", err
 	}
 	apiKey := ""
+	if provider := AgentProvider(settings); options.OnlyTools && (provider == ProviderClaude || provider == ProviderAntigravity) {
+		settings.Provider, err = coordinatorProvider(ctx, settings)
+		if err != nil {
+			return "", err
+		}
+	}
 	switch AgentProvider(settings) {
 	case ProviderOpenRouter:
 		apiKey, err = loadOpenRouterAPIKey()
@@ -191,7 +197,7 @@ func Run(ctx context.Context, prompt string, options RunOptions) (string, error)
 			return "", errors.New("choose a ChatGPT model with `pearl model`")
 		}
 	default:
-		return "", errors.New("unknown provider; run `pearl provider openrouter` or `pearl provider chatgpt`")
+		return "", errors.New("Pearl's own agent loop can't use this provider; choose a model with `pearl model`")
 	}
 	if err != nil {
 		return "", err

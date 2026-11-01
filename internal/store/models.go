@@ -18,8 +18,10 @@ const (
 )
 
 const (
-	HarnessPearl = "pearl"
-	HarnessCodex = "codex"
+	HarnessPearl       = "pearl"
+	HarnessCodex       = "codex"
+	HarnessClaude      = "claude"
+	HarnessAntigravity = "antigravity"
 )
 
 // NormalizeHarness returns the canonical harness name. An empty name means the
@@ -27,10 +29,10 @@ const (
 func NormalizeHarness(name string) (string, error) {
 	name = strings.ToLower(strings.TrimSpace(name))
 	switch name {
-	case "", HarnessPearl, HarnessCodex:
+	case "", HarnessPearl, HarnessCodex, HarnessClaude, HarnessAntigravity:
 		return name, nil
 	}
-	return "", fmt.Errorf("unknown harness %q; use %q or %q", name, HarnessPearl, HarnessCodex)
+	return "", fmt.Errorf("unknown harness %q; use %q, %q, %q or %q", name, HarnessPearl, HarnessCodex, HarnessClaude, HarnessAntigravity)
 }
 
 type Job struct {

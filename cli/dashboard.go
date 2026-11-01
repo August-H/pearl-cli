@@ -21,7 +21,6 @@ import (
 
 	"github.com/August-H/pearl-cli/internal/daemon"
 	"github.com/August-H/pearl-cli/internal/store"
-	"github.com/August-H/pearl-cli/openrouter_request"
 	"golang.org/x/term"
 )
 
@@ -182,9 +181,18 @@ var dashboardCommandOptions = []dashboardCommandSuggestion{
 	{usage: "job <prompt>", completion: "job ", description: "Create a job in the current directory"},
 	{usage: "job <prompt> -n <name>", completion: "job ", description: "Give the job a custom ID"},
 	{usage: "job <prompt> [-n name] --directory", completion: "job ", description: "Choose the job directory"},
-	{usage: "job <prompt> --harness codex", completion: "job ", description: "Run this job with Codex"},
 	{usage: "job <prompt> --folder <name>", completion: "job ", description: "Create a job in a folder"},
-	{usage: "harness", completion: "harness", description: "Choose the default agent harness"},
+	{usage: "claude", completion: "claude", description: "Check the Claude Code connection"},
+	{usage: "claude login", completion: "claude login", description: "Sign in to Claude Code"},
+	{usage: "claude logout", completion: "claude logout", description: "Sign out of Claude Code"},
+	{usage: "antigravity", completion: "antigravity", description: "Check the Antigravity connection"},
+	{usage: "antigravity login", completion: "antigravity login", description: "Sign in with your Google account"},
+	{usage: "antigravity logout", completion: "antigravity logout", description: "Remove Pearl's saved sign-in"},
+	{usage: "usage", completion: "usage", description: "Show the selected plan's usage limits"},
+	{usage: "usage chatgpt", completion: "usage chatgpt", description: "Show ChatGPT usage limits"},
+	{usage: "usage claude", completion: "usage claude", description: "Show Claude usage limits"},
+	{usage: "usage antigravity", completion: "usage antigravity", description: "Show Gemini usage limits"},
+	{usage: "accounts", completion: "accounts", description: "Show every signed-in account and its limits"},
 	{usage: "folder", completion: "folder", description: "List job folders"},
 	{usage: "folder create <name>", completion: "folder create ", description: "Create a folder for this directory"},
 	{usage: "folder edit <name>", completion: "folder edit ", description: "Change a folder's directory"},
@@ -207,6 +215,8 @@ var dashboardCommandOptions = []dashboardCommandSuggestion{
 	{usage: "daemon install", completion: "daemon install", description: "Start Pearl at login"},
 	{usage: "daemon uninstall", completion: "daemon uninstall", description: "Remove the login service"},
 	{usage: "auth login chatgpt", completion: "auth login chatgpt", description: "Link your ChatGPT plan"},
+	{usage: "auth login claude", completion: "auth login claude", description: "Add Claude models from Claude Code"},
+	{usage: "auth login antigravity", completion: "auth login antigravity", description: "Add Google models from Antigravity"},
 	{usage: "auth status", completion: "auth status", description: "Show the linked ChatGPT account"},
 	{usage: "auth accounts", completion: "auth accounts", description: "List ChatGPT accounts"},
 	{usage: "auth logout", completion: "auth logout", description: "Sign out of ChatGPT"},
@@ -222,28 +232,31 @@ var dashboardConfigureModelOptions = []dashboardCommandSuggestion{
 }
 
 var dashboardCommandDescriptions = map[string]string{
-	"auth":       "Link and manage ChatGPT accounts",
-	"provider":   "Choose ChatGPT or OpenRouter",
-	"run":        "Run or retry a job",
-	"configure":  "Set the API key and model",
-	"model":      "Browse and set the model",
-	"harness":    "Choose the default agent harness",
-	"jobs":       "List the job board",
-	"archive":    "List archived jobs",
-	"autonomous": "Open or start autonomous mode",
-	"job":        "Create a job",
-	"folder":     "Manage job folders",
-	"skills":     "Open the skills folder",
-	"status":     "Show daemon and queue status",
-	"update":     "Update Pearl to the latest release",
-	"attach":     "Stream a job's output",
-	"respond":    "Answer a paused job or follow up on a finished one",
-	"cancel":     "Cancel a job",
-	"retry":      "Retry a finished job",
-	"schedule":   "Manage recurring jobs",
-	"daemon":     "Manage the background process",
-	"help":       "Show command help",
-	"exit":       "Close the dashboard",
+	"auth":        "Sign in and manage your accounts",
+	"provider":    "Choose ChatGPT or OpenRouter",
+	"run":         "Run or retry a job",
+	"configure":   "Set the API key and model",
+	"model":       "Browse and set the model",
+	"usage":       "Show your plan's usage limits",
+	"accounts":    "Show every signed-in account and its limits",
+	"claude":      "Check the Claude Code connection",
+	"antigravity": "Check the Antigravity connection",
+	"jobs":        "List the job board",
+	"archive":     "List archived jobs",
+	"autonomous":  "Open or start autonomous mode",
+	"job":         "Create a job",
+	"folder":      "Manage job folders",
+	"skills":      "Open the skills folder",
+	"status":      "Show daemon and queue status",
+	"update":      "Update Pearl to the latest release",
+	"attach":      "Stream a job's output",
+	"respond":     "Answer a paused job or follow up on a finished one",
+	"cancel":      "Cancel a job",
+	"retry":       "Retry a finished job",
+	"schedule":    "Manage recurring jobs",
+	"daemon":      "Manage the background process",
+	"help":        "Show command help",
+	"exit":        "Close the dashboard",
 }
 
 func runDashboard(args []string) int {
@@ -299,19 +312,21 @@ func dashboardLoop(
 	}
 	defer term.Restore(int(input.Fd()), terminalState)
 
-	fmt.Fprint(output, "\x1b[?1049h\x1b[?25l\x1b[?2004h")
-	defer fmt.Fprint(output, jobsListMouseDisable, "\x1b[?2004l\x1b[?25h\x1b[?1049l")
+	fmt.Fprint(output, "\x1b[?1049h\x1b[?25l\x1b[?2004h", dashboardKeyboardEnable)
+	defer fmt.Fprint(output, dashboardKeyboardDisable, jobsListMouseDisable, "\x1b[?2004l\x1b[?25h\x1b[?1049l")
 
 	sessionContext, cancelSession := context.WithCancel(ctx)
 	defer cancelSession()
 	var inputLock sync.Mutex
 	var renderLock sync.Mutex
+	var bodyScroll dashboardBodyScroll
 	mouseEnabled := false
 	commandText := ""
 	editorOpen := false
 	notice := ""
 	selectedSuggestion := 0
 	var history dashboardHistory
+	checkModelCatalogsIfOld()
 	currentModel := currentModelID()
 	currentHarness := daemon.DefaultHarness()
 	currentBillingProvider := currentProvider()
@@ -323,7 +338,6 @@ func dashboardLoop(
 	var jobDetailsView *dashboardJobDetailsView
 	var autonomousView *dashboardAutonomousView
 	var modelView *modelPickerState
-	var harnessView *harnessPickerState
 	dashboardWorkspace := currentWorkspace()
 	var jobsLock sync.RWMutex
 	var jobs []store.Job
@@ -438,7 +452,7 @@ func dashboardLoop(
 		width := readWidth()
 		height := dashboardHeight(input)
 		inputLock.Lock()
-		wantMouse := modelView != nil || harnessView != nil ||
+		wantMouse := modelView != nil ||
 			jobDetailsView == nil && autonomousView == nil
 		if wantMouse != mouseEnabled {
 			if wantMouse {
@@ -452,12 +466,6 @@ func dashboardLoop(
 			screen := modelView.screen(width, height, color)
 			inputLock.Unlock()
 			fmt.Fprint(output, "\x1b[H", listTerminalFrame(screen.Frame))
-			return
-		}
-		if harnessView != nil {
-			frame := harnessView.screen(width, height, color)
-			inputLock.Unlock()
-			fmt.Fprint(output, "\x1b[H", listTerminalFrame(frame))
 			return
 		}
 		if autonomousView != nil {
@@ -558,15 +566,18 @@ func dashboardLoop(
 		visibleCommandView := commandView
 		visibleCommandView.recalling = history.browsing
 		visibleCommandView.model = displayCurrentModel(currentModel)
-		visibleCommandView.harness = currentHarness
 		visibleCommandView.provider = currentBillingProvider
+		visibleCommandView.harness = currentHarness
 		visibleCommandView.workspace = dashboardWorkspace
 		inputLock.Unlock()
-		frame := renderDashboardState(
+		body, composer := renderDashboardParts(
 			boardJobs, time.Now(), width, color, visibleLoadErr, visibleCommand, visibleNotice,
 			visibleSuggestion, visibleCommandView,
 		)
-		fmt.Fprint(output, "\x1b[H", listTerminalFrame(dashboardFitHeight(frame, height)))
+		inputLock.Lock()
+		frame := bodyScroll.fit(body, composer, width, height, color)
+		inputLock.Unlock()
+		fmt.Fprint(output, "\x1b[H", listTerminalFrame(frame))
 	}
 	finishDashboardConfigure := func(apiKey, model string) {
 		inputLock.Lock()
@@ -662,14 +673,13 @@ func dashboardLoop(
 				draw(false)
 				continue
 			}
-			if escapeSequence == "\x1b\r" || escapeSequence == "\x1b\n" {
+			key, keyReport := composerKeyFromSequence(escapeSequence)
+			if keyReport {
 				escapeSequence = ""
-				inputLock.Lock()
-				commandText += "\n"
-				inputLock.Unlock()
-				draw(false)
-				continue
+				character = key
 			}
+		}
+		if escapeSequence != "" {
 			action, complete := jobViewEscapeAction(escapeSequence)
 			if !complete {
 				continue
@@ -690,11 +700,6 @@ func dashboardLoop(
 					inputLock.Unlock()
 					continue
 				}
-			case harnessView != nil:
-				if !harnessView.applyAction(action) {
-					inputLock.Unlock()
-					continue
-				}
 			case autonomousView != nil:
 			case jobDetailsView != nil:
 				dashboardApplyJobDetailsAction(jobDetailsView, action)
@@ -703,6 +708,7 @@ func dashboardLoop(
 					inputLock.Unlock()
 					continue
 				}
+			case bodyScroll.apply(action):
 			case (action == "previous" || action == "next") &&
 				commandView.configureStep == dashboardConfigureInactive &&
 				(history.browsing || commandText == ""):
@@ -731,6 +737,22 @@ func dashboardLoop(
 			escapeSequence = "\x1b"
 			continue
 		}
+		// Ctrl+J sends a bare line feed, while Enter sends a carriage return.
+		if character == composerNewlineKey || character == '\n' {
+			inputLock.Lock()
+			composing := modelView == nil && autonomousView == nil && jobDetailsView == nil &&
+				!jobsView.open && commandView.configureStep == dashboardConfigureInactive
+			if composing && len(commandText) < dashboardDraftLimit {
+				commandText += "\n"
+				selectedSuggestion = 0
+			}
+			inputLock.Unlock()
+			if composing {
+				draw(false)
+				continue
+			}
+			character = '\r'
+		}
 
 		inputLock.Lock()
 		snapshotArchived := jobsView.open && jobsView.archived
@@ -747,36 +769,22 @@ func dashboardLoop(
 				notice = "Model unchanged: " + displayCurrentModel(modelView.currentID)
 				modelView = nil
 			}
+			var choices []modelRow
+			if modelView != nil {
+				choices = modelView.rows
+			}
 			inputLock.Unlock()
 			if chosen != "" {
-				_, saveErr := openrouter_request.ConfigureAgentModel(chosen)
+				_, saveErr := saveModelChoice(choices, chosen)
+				provider, harness := currentProvider(), daemon.DefaultHarness()
 				inputLock.Lock()
 				if saveErr != nil {
 					modelView.notice = "Model: " + dashboardText(saveErr.Error())
 				} else {
 					modelView = nil
 					currentModel = chosen
-					notice = "Model: " + chosen
-				}
-				inputLock.Unlock()
-			}
-			draw(false)
-			continue
-		}
-		if harnessView != nil {
-			chosen, done := harnessView.handleKey(character)
-			if done && (chosen == "" || chosen == currentHarness) {
-				harnessView = nil
-			}
-			inputLock.Unlock()
-			if chosen != "" && chosen != currentHarness {
-				saved, saveErr := saveDefaultHarness(chosen)
-				inputLock.Lock()
-				if saveErr != nil {
-					harnessView.notice = "Harness: " + dashboardText(saveErr.Error())
-				} else {
-					harnessView = nil
-					currentHarness = saved
+					currentBillingProvider, currentHarness = provider, harness
+					notice = "Model: " + modelLabel(chosen)
 				}
 				inputLock.Unlock()
 			}
@@ -1021,14 +1029,14 @@ func dashboardLoop(
 			editorOpen = true
 			inputLock.Unlock()
 			renderLock.Lock()
-			fmt.Fprint(output, jobsListMouseDisable, "\x1b[?2004l\x1b[?25h\x1b[?1049l")
+			fmt.Fprint(output, dashboardKeyboardDisable, jobsListMouseDisable, "\x1b[?2004l\x1b[?25h\x1b[?1049l")
 			restoreErr := term.Restore(int(input.Fd()), terminalState)
 			edited, editErr := original, restoreErr
 			if restoreErr == nil {
 				edited, editErr = editDashboardDraft(sessionContext, original, input, output)
 			}
 			_, rawErr := term.MakeRaw(int(input.Fd()))
-			fmt.Fprint(output, "\x1b[?1049h\x1b[?25l\x1b[?2004h")
+			fmt.Fprint(output, "\x1b[?1049h\x1b[?25l\x1b[?2004h", dashboardKeyboardEnable)
 			renderLock.Unlock()
 			inputLock.Lock()
 			editorOpen = false
@@ -1188,14 +1196,6 @@ func dashboardLoop(
 				draw(false)
 				continue
 			}
-			if len(parsed) == 1 && parsed[0] == "harness" {
-				harnessView = newHarnessPicker(currentHarness, availableHarnesses())
-				commandView = dashboardCommandView{}
-				commandText, selectedSuggestion = "", 0
-				inputLock.Unlock()
-				draw(false)
-				continue
-			}
 			switch parsed[0] {
 			case "exit", "quit":
 				inputLock.Unlock()
@@ -1335,7 +1335,7 @@ func dashboardLoop(
 					commandCancel = cancel
 					commandView = dashboardCommandView{
 						command: strings.Join(parsed, " "), running: true,
-						output: "Loading models from " + currentBillingProvider + "...\n",
+						output: "Loading models...\n",
 					}
 					commandText, selectedSuggestion = "", 0
 					inputLock.Unlock()
@@ -1379,6 +1379,7 @@ func dashboardLoop(
 					command: strings.Join(parsed, " "),
 					running: true,
 				}
+				bodyScroll.toBottom()
 				commandText = ""
 				selectedSuggestion = 0
 				inputLock.Unlock()
@@ -1401,10 +1402,6 @@ func dashboardLoop(
 					inputLock.Lock()
 					commandView.running = false
 					commandView.exitCode = exitCode
-					if exitCode == 0 && arguments[0] == "harness" {
-						// The harness line under the composer already shows the result.
-						commandView = dashboardCommandView{}
-					}
 					commandCancel = nil
 					inputLock.Unlock()
 					if sessionContext.Err() == nil {
@@ -1478,6 +1475,78 @@ func dashboardFitHeight(frame string, height int) string {
 	if height > 0 && len(lines) > height {
 		lines = lines[len(lines)-height:]
 	}
+	return strings.Join(lines, "\n")
+}
+
+const dashboardWheelLines = 3
+
+// dashboardBodyScroll is how far the dashboard above the input box is scrolled.
+// It counts up from the bottom, so new output stays in view until you scroll up.
+type dashboardBodyScroll struct {
+	offset, total, visible int
+}
+
+func (scroll *dashboardBodyScroll) toBottom() { scroll.offset = 0 }
+
+// apply reports whether the action was a scrolling one.
+func (scroll *dashboardBodyScroll) apply(action string) bool {
+	switch action {
+	case "scroll_up":
+		scroll.offset += dashboardWheelLines
+	case "scroll_down":
+		scroll.offset -= dashboardWheelLines
+	case "page_up":
+		scroll.offset += max(1, scroll.visible-1)
+	case "page_down":
+		scroll.offset -= max(1, scroll.visible-1)
+	case "home":
+		scroll.offset = scroll.total
+	case "end":
+		scroll.offset = 0
+	default:
+		return false
+	}
+	scroll.offset = min(max(0, scroll.offset), max(0, scroll.total-scroll.visible))
+	return true
+}
+
+// fit returns a screenful: the scrolled part of the body above the input box.
+func (scroll *dashboardBodyScroll) fit(body, composer string, width, height int, color bool) string {
+	composerLines := strings.Split(strings.TrimSuffix(composer, "\n"), "\n")
+	bodyLines := strings.Split(strings.TrimSuffix(body, "\n"), "\n")
+	visible := height - len(composerLines)
+	// With no real height, or no room left for the body, keep the input box.
+	if height <= 0 || visible < 2 {
+		*scroll = dashboardBodyScroll{}
+		return dashboardFitHeight(body+composer, height)
+	}
+	if len(bodyLines) <= visible {
+		*scroll = dashboardBodyScroll{total: len(bodyLines), visible: visible}
+		return strings.Join(append(bodyLines, composerLines...), "\n")
+	}
+	// One line says there's more.
+	visible--
+	// While scrolled up, stay on the same lines as new ones arrive below.
+	if scroll.offset > 0 && len(bodyLines) > scroll.total {
+		scroll.offset += len(bodyLines) - scroll.total
+	}
+	scroll.total, scroll.visible = len(bodyLines), visible
+	scroll.offset = min(max(0, scroll.offset), scroll.total-visible)
+	end := scroll.total - scroll.offset
+	start := end - visible
+	var position []string
+	if start > 0 {
+		position = append(position, fmt.Sprintf("↑ %d above", start))
+	}
+	if scroll.offset > 0 {
+		position = append(position, fmt.Sprintf("↓ %d below", scroll.offset))
+	}
+	position = append(position, "scroll or PgUp/PgDn")
+	hint := dashboardPaint(color, ansiDim, dashboardTruncate("  "+strings.Join(position, " · "), width))
+	lines := make([]string, 0, height)
+	lines = append(lines, bodyLines[start:end]...)
+	lines = append(lines, hint)
+	lines = append(lines, composerLines...)
 	return strings.Join(lines, "\n")
 }
 
@@ -2244,6 +2313,24 @@ func renderDashboardState(
 	selectedSuggestion int,
 	commandView dashboardCommandView,
 ) string {
+	body, composer := renderDashboardParts(
+		jobs, now, width, color, loadErr, commandText, notice, selectedSuggestion, commandView,
+	)
+	return body + composer
+}
+
+// renderDashboardParts returns what can scroll and the input box that stays put.
+func renderDashboardParts(
+	jobs []store.Job,
+	now time.Time,
+	width int,
+	color bool,
+	loadErr error,
+	commandText string,
+	notice string,
+	selectedSuggestion int,
+	commandView dashboardCommandView,
+) (string, string) {
 	if commandView.workspace != "" {
 		jobs = filterJobsForWorkspace(jobs, commandView.workspace)
 	}
@@ -2374,12 +2461,11 @@ func renderDashboardState(
 	}
 
 	fmt.Fprintln(&frame)
-	fmt.Fprint(&frame, renderDashboardComposer(
+	return frame.String(), renderDashboardComposer(
 		jobs, commandText, notice, width, color, selectedSuggestion, commandView.running,
 		commandView.configureStep, commandView.recalling, commandView.model, commandView.harness,
 		running, queued, waiting, loadErr == nil, commandView.provider,
-	))
-	return frame.String()
+	)
 }
 
 func renderDashboardCommandOutput(
@@ -2697,13 +2783,13 @@ func renderDashboardComposer(
 	if model != "" || harness != "" {
 		var details []string
 		if model != "" {
-			details = append(details, "Default model: "+model)
+			details = append(details, "Model: "+model)
 		}
 		if harness != "" {
-			details = append(details, "Default harness: "+harness)
+			details = append(details, "Harness: "+harnessLabel(harness))
 		}
 		if len(providers) > 0 && providers[0] != "" {
-			details = append([]string{"Billing: " + providers[0]}, details...)
+			details = append([]string{"Billing: " + billingLabel(daemon.BillingFor(providers[0]))}, details...)
 		}
 		fmt.Fprintln(&composer, dashboardTruncate("  "+strings.Join(details, " · "), width))
 	}
@@ -2730,9 +2816,9 @@ func renderDashboardComposer(
 		)
 	}
 	if leftHint == "" {
-		leftHint = "  Enter to run · Alt+Enter newline · Ctrl+E editor"
+		leftHint = "  Enter to run · " + composerNewlineHint() + " newline · Ctrl+E editor"
 	} else if configureStep == dashboardConfigureInactive && !commandRunning {
-		fmt.Fprintln(&composer, dashboardTruncate("  Alt+Enter newline · Ctrl+E editor · pasted newlines stay in draft", width))
+		fmt.Fprintln(&composer, dashboardTruncate("  "+composerNewlineHint()+" newline · Ctrl+E editor · pasted newlines stay in draft", width))
 	}
 	rightHint := ""
 	if configureStep != dashboardConfigureInactive {

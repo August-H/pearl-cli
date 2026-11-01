@@ -371,7 +371,7 @@ func (r recordingRunner) Run(
 }
 
 func TestHarnessRunnerUsesTheDefaultHarnessAndRecordsIt(t *testing.T) {
-	writeCodexTestConfig(t, `{"model":"openrouter/free","harness":"codex"}`)
+	writeCodexTestConfig(t, `{"provider":"chatgpt","model":"openrouter/free","chatgpt_model":"gpt-x"}`)
 	state, err := store.Open(filepath.Join(t.TempDir(), "pearl.db"))
 	if err != nil {
 		t.Fatal(err)
@@ -397,15 +397,71 @@ func TestHarnessRunnerUsesTheDefaultHarnessAndRecordsIt(t *testing.T) {
 	if stored, err := state.GetJob(ctx, defaultJob.ID); err != nil || stored.Harness != store.HarnessCodex {
 		t.Fatalf("stored harness = %q, %v", stored.Harness, err)
 	}
+}
 
-	pearlJob, err := state.CreatePendingJob(ctx, "", "explicit", t.TempDir(), store.HarnessPearl)
+func TestFindCodexNeverInstallsOne(t *testing.T) {
+	t.Setenv(codexPathEnvironment, "")
+	t.Setenv("PATH", t.TempDir())
+	t.Setenv("HOME", t.TempDir())
+	if runtime.GOOS == "windows" {
+		t.Skip("the fixed install locations are Unix ones")
+	}
+	if _, err := os.Stat("/opt/homebrew/bin/codex"); err == nil {
+		t.Skip("this machine has Codex in a fixed location")
+	}
+	if _, err := os.Stat("/usr/local/bin/codex"); err == nil {
+		t.Skip("this machine has Codex in a fixed location")
+	}
+	if _, err := FindCodex(); !errors.Is(err, ErrCodexNotInstalled) {
+		t.Fatalf("err = %v", err)
+	}
+}
+
+// Codex's installer links to a release under ~/.codex, and Codex restarts itself by
+// the path it was given. Through the link, the sandbox blocks that and every job fails.
+func TestFindCodexFollowsLinksSoItCanRestartItself(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("links need special permission on Windows")
+	}
+	directory, err := filepath.EvalSymlinks(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := runner.Run(ctx, pearlJob, nil, state); err != nil {
+	real := filepath.Join(directory, "releases", "1.0.0", "bin", "codex")
+	if err := os.MkdirAll(filepath.Dir(real), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if pearlRan != store.HarnessPearl {
-		t.Fatalf("explicit Pearl job ran with %q", pearlRan)
+	if err := os.WriteFile(real, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(directory, "codex")
+	if err := os.Symlink(real, link); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(codexPathEnvironment, "")
+	t.Setenv("PATH", directory)
+	if got, err := FindCodex(); err != nil || got != real {
+		t.Errorf("on PATH: path = %q, err = %v, want %q", got, err, real)
+	}
+	t.Setenv(codexPathEnvironment, link)
+	if got, err := FindCodex(); err != nil || got != real {
+		t.Errorf("chosen: path = %q, err = %v, want %q", got, err, real)
+	}
+}
+
+func TestCodexSandboxKeepsCodexsSignInBlocked(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Codex can't apply per-path rules on Windows")
+	}
+	home, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", home)
+	t.Setenv("PEARL_CONFIG_DIR", filepath.Join(home, "pearl"))
+	arguments := strings.Join(codexPermissionArguments(), " ")
+	folder := codexTOMLString(filepath.Join(home, ".codex"))
+	if !strings.Contains(arguments, folder+`="deny"`) || strings.Contains(arguments, folder+`="read"`) {
+		t.Errorf("~/.codex must stay blocked: %s", arguments)
 	}
 }

@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/August-H/pearl-cli/internal/filelock"
 	"os"
 	"path/filepath"
 	"time"
@@ -58,7 +59,7 @@ func (c *Client) withCredentials(ctx context.Context, fn func(*credentials) erro
 	}
 	defer lock.Close()
 	for {
-		locked, err := tryLock(lock)
+		locked, err := filelock.TryLock(lock)
 		if err != nil {
 			return err
 		}
@@ -71,7 +72,7 @@ func (c *Client) withCredentials(ctx context.Context, fn func(*credentials) erro
 		case <-time.After(25 * time.Millisecond):
 		}
 	}
-	defer unlock(lock)
+	defer filelock.Unlock(lock)
 	path := filepath.Join(paths.Directory, "chatgpt.json")
 	var saved credentials
 	data, err := os.ReadFile(path)

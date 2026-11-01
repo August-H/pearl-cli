@@ -93,14 +93,14 @@ func (c *daemonClient) submitNamed(
 	ctx context.Context,
 	name, prompt, workspace string,
 ) (store.Job, error) {
-	return c.submitJob(ctx, name, prompt, workspace, "", "")
+	return c.submitJob(ctx, name, prompt, workspace, "")
 }
 
 // submitJob creates a pending job. A folder supplies the directory, so
 // workspace is ignored when folder is set.
 func (c *daemonClient) submitJob(
 	ctx context.Context,
-	name, prompt, workspace, harness, folder string,
+	name, prompt, workspace, folder string,
 ) (store.Job, error) {
 	var job store.Job
 	input := map[string]string{"prompt": prompt}
@@ -111,9 +111,6 @@ func (c *daemonClient) submitJob(
 	}
 	if name = strings.TrimSpace(name); name != "" {
 		input["name"] = name
-	}
-	if harness = strings.TrimSpace(harness); harness != "" {
-		input["harness"] = harness
 	}
 	err := c.request(ctx, http.MethodPost, "/v1/jobs", input, &job)
 	return job, err

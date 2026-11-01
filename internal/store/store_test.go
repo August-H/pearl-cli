@@ -63,7 +63,7 @@ func TestJobsRememberTheirHarness(t *testing.T) {
 	if stored, err := state.GetJob(ctx, job.ID); err != nil || stored.Harness != HarnessPearl {
 		t.Fatalf("updated harness = %q, %v", stored.Harness, err)
 	}
-	if _, err := state.CreatePendingJob(ctx, "", "bad", t.TempDir(), "claude"); err == nil {
+	if _, err := state.CreatePendingJob(ctx, "", "bad", t.TempDir(), "not-a-harness"); err == nil {
 		t.Fatal("an unknown harness was accepted")
 	}
 	if defaultJob, err := state.CreateJob(ctx, "default", t.TempDir()); err != nil || defaultJob.Harness != "" {

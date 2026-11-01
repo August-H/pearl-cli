@@ -1,6 +1,5 @@
 # Pearl CLI installer for Windows: downloads the latest release binary,
 # verifies its SHA-256 checksum, and installs it into a user-owned directory.
-# It then installs Pearl's own copy of Codex for the Codex harness.
 #
 # Usage:
 #   irm https://raw.githubusercontent.com/August-H/pearl-cli/main/install.ps1 | iex
@@ -8,7 +7,6 @@
 # Optional environment overrides (useful for mirrors and testing):
 #   PEARL_INSTALL_DIR   target directory (default: %USERPROFILE%\bin)
 #   PEARL_DOWNLOAD_BASE asset base URL
-#   PEARL_SKIP_CODEX    set to 1 to skip installing Codex
 
 $ErrorActionPreference = "Stop"
 
@@ -74,20 +72,6 @@ or build from source: go build -o pearl.exe ./cmd/pearl
     }
     Write-Host "Installed $Target $Version"
 
-    if ($env:PEARL_SKIP_CODEX -eq "1") {
-        Write-Host "Skipping Codex (PEARL_SKIP_CODEX=1)."
-    } else {
-        $CodexInstalled = $false
-        try {
-            & $Target codex install
-            $CodexInstalled = ($LASTEXITCODE -eq 0)
-        } catch {
-            $CodexInstalled = $false
-        }
-        if (-not $CodexInstalled) {
-            Write-Warning 'Pearl is installed, but Codex could not be installed. Run "pearl codex install" later to use the Codex harness.'
-        }
-    }
     Write-Host 'Next step: run "pearl configure" to add your OpenRouter API key.'
 } finally {
     Remove-Item -Recurse -Force $TempDir
