@@ -188,10 +188,56 @@ func TestReviewerRepliesMustStartWithAVerdict(t *testing.T) {
 		"**ALLOW** fits":                     true,
 		"DENY\nUnrelated to the task.":       false,
 		"Sure, that seems fine":              false,
+		"ALLOWED? No":                        false,
+		"ALLOWANCE exceeded":                 false,
+		"DENYING":                            false,
+		"ALLOW? NO":                          false,
 		"":                                   false,
 	} {
 		if decision := parseOutsideDecision(reply); decision.Allow != allow {
 			t.Errorf("parseOutsideDecision(%q) = %+v", reply, decision)
+		}
+	}
+}
+
+func TestOutsideAccessPolicyValues(t *testing.T) {
+	config := t.TempDir()
+	t.Setenv("PEARL_CONFIG_DIR", config)
+	for value, want := range map[string]string{
+		`{}`:                          OutsideAccessReview,
+		`{"outside_access":""}`:       OutsideAccessReview,
+		`{"outside_access":"review"}`: OutsideAccessReview,
+		`{"outside_access":" ASK "}`:  OutsideAccessAsk,
+		`{"outside_access":"deny"}`:   OutsideAccessDeny,
+		`{"outside_access":"denny"}`:  OutsideAccessDeny,
+		`{"outside_access":"always"}`: OutsideAccessDeny,
+		`{"outside_access":1}`:        OutsideAccessDeny,
+		`not json`:                    OutsideAccessDeny,
+	} {
+		if err := os.WriteFile(filepath.Join(config, "settings.json"), []byte(value), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if policy := outsideAccessPolicy(); policy != want {
+			t.Errorf("settings %s gave policy %q, want %q", value, policy, want)
+		}
+	}
+}
+
+func TestApprovalMustBeAPlainYes(t *testing.T) {
+	for answer, want := range map[string]bool{
+		"y":                        true,
+		"yes":                      true,
+		" YES. ":                   true,
+		"Yes!":                     true,
+		"no":                       false,
+		"":                         false,
+		"yesterday I said no":      false,
+		"yes, but not this folder": false,
+		"you should not do that":   false,
+		"y u want this? no":        false,
+	} {
+		if got := approvedByUser(answer); got != want {
+			t.Errorf("approvedByUser(%q) = %v, want %v", answer, got, want)
 		}
 	}
 }

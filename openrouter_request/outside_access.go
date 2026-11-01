@@ -80,23 +80,35 @@ func parseOutsideDecision(text string) outsideDecision {
 	first, rest, _ := strings.Cut(text, "\n")
 	first = strings.ToUpper(strings.Trim(strings.TrimSpace(first), "*`#:. "))
 	reason := strings.TrimSpace(rest)
-	switch {
-	case strings.HasPrefix(first, "ALLOW"):
-		if reason == "" {
-			reason = strings.TrimSpace(strings.TrimPrefix(first, "ALLOW"))
-		}
+	// The verdict must be a whole word, so "ALLOWED? NO" is not an approval.
+	verdict, remainder, _ := strings.Cut(first, " ")
+	verdict = strings.Trim(verdict, "*`#:.")
+	if reason == "" {
+		reason = strings.TrimSpace(strings.Trim(remainder, "*`#:. "))
+	}
+	switch verdict {
+	case "ALLOW":
 		return outsideDecision{Allow: true, Reason: reason}
-	case strings.HasPrefix(first, "DENY"):
-		if reason == "" {
-			reason = strings.TrimSpace(strings.TrimPrefix(first, "DENY"))
-		}
+	case "DENY":
 		return outsideDecision{Reason: reason}
 	}
 	return outsideDecision{Reason: "the reviewer did not give a clear ALLOW or DENY"}
 }
 
+// approvedByUser accepts only a plain yes. Anything else is a refusal, so a
+// reply such as "yesterday I said no" can't grant access by accident.
+func approvedByUser(answer string) bool {
+	switch strings.ToLower(strings.TrimRight(strings.TrimSpace(answer), ".! ")) {
+	case "y", "yes":
+		return true
+	}
+	return false
+}
+
 // outsideAccessPolicy reads the policy from the user's own settings only, so
-// a repository's settings.json can never loosen it.
+// a repository's settings.json can never loosen it. An unset policy means
+// review. A value Pearl doesn't recognize means deny, so a typo in a stricter
+// setting can't quietly weaken it.
 func outsideAccessPolicy() string {
 	for _, path := range pearlConfigFiles("settings.json", false) {
 		data, err := os.ReadFile(path)
@@ -110,10 +122,12 @@ func outsideAccessPolicy() string {
 			return OutsideAccessDeny
 		}
 		switch policy := strings.ToLower(strings.TrimSpace(settings.OutsideAccess)); policy {
+		case "", OutsideAccessReview:
+			return OutsideAccessReview
 		case OutsideAccessAsk, OutsideAccessDeny:
 			return policy
 		}
-		return OutsideAccessReview
+		return OutsideAccessDeny
 	}
 	return OutsideAccessReview
 }
@@ -358,7 +372,7 @@ func (a *outsideAccess) handle(ctx context.Context, call agentToolCall, options 
 					input.Access, target, input.Reason),
 			}
 		}
-		allow := strings.HasPrefix(strings.ToLower(strings.TrimSpace(answer)), "y")
+		allow := approvedByUser(answer)
 		reason := "you answered " + strings.TrimSpace(answer)
 		return a.grant(options, input.Access, target, directory, allow, reason)
 	}

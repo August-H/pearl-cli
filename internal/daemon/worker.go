@@ -232,9 +232,11 @@ func (m *Manager) runJob(parent context.Context, job store.Job) {
 }
 
 func (m *Manager) finishJob(jobID, status, result, errorText string) {
-	if job, err := m.store.GetJob(context.Background(), jobID); err == nil && job.Verification == "running" {
-		_, _ = m.store.AppendEvent(context.Background(), jobID, "verification", verification.Event("failed", job.VerificationCommand))
+	verificationContext, verificationCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	if job, err := m.store.GetJob(verificationContext, jobID); err == nil && job.Verification == "running" {
+		_, _ = m.store.AppendEvent(verificationContext, jobID, "verification", verification.Event("failed", job.VerificationCommand))
 	}
+	verificationCancel()
 	var lastError error
 	for attempt := 0; attempt < 3; attempt++ {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)

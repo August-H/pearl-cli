@@ -105,7 +105,7 @@ func TestCommandCancellationStopsChildProcesses(t *testing.T) {
 	}
 	finished := make(chan outcome, 1)
 	go func() {
-		result, err := executeWorkspaceCommand(ctx, executable, []string{"-test.run=^TestCommandHelper$", "--", "child"}, root)
+		result, err := executeWorkspaceCommand(ctx, executable, []string{"-test.run=^TestCommandHelper$", "--", "child"}, root, []string{"PEARL_COMMAND_TEST_HELPER"})
 		finished <- outcome{result, err}
 	}()
 	for {
@@ -144,6 +144,7 @@ func TestCommandsEnforcePolicyAndBoundExecution(t *testing.T) {
 	settings, _ := json.Marshal(map[string]any{
 		"model": "dummy", "allowed_commands": []string{executable},
 		"allow_unsandboxed_commands": runtime.GOOS != "darwin",
+		"allowed_command_env":        []string{"PEARL_COMMAND_TEST_HELPER", "GORACE"},
 	})
 	if err := os.WriteFile(filepath.Join(config, "settings.json"), settings, 0o600); err != nil {
 		t.Fatal(err)
@@ -213,7 +214,7 @@ func TestSandboxKeepsCommandsInTheWorkspace(t *testing.T) {
 	t.Setenv("PEARL_ESCAPE_WRITE", filepath.Join(outside, "escaped.txt"))
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	result, err := executeWorkspaceCommand(ctx, program, arguments, workspace)
+	result, err := executeWorkspaceCommand(ctx, program, arguments, workspace, []string{"PEARL_COMMAND_TEST_HELPER", "PEARL_ESCAPE_READ", "PEARL_ESCAPE_WRITE"})
 	if err != nil {
 		t.Fatal(err)
 	}

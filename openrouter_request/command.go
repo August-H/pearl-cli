@@ -122,25 +122,62 @@ func runWorkspaceCommandWithEvents(ctx context.Context, call agentToolCall, root
 			return fail(err)
 		}
 	}
-	result, err := executeWorkspaceCommand(ctx, program, arguments, directory)
+	result, err := executeWorkspaceCommand(ctx, program, arguments, directory, policy.AllowedEnv)
 	if err != nil {
 		return fail(err)
 	}
 	return agentToolResult{Success: result.ExitCode == 0 && !result.TimedOut, Result: result}
 }
 
-func executeWorkspaceCommand(ctx context.Context, executable string, args []string, directory string) (commandResult, error) {
+// commandEnvironmentNames lists what build and test tools need from the
+// environment. Everything else is withheld, because credentials go by too many
+// names to filter out reliably. Users add names with allowed_command_env.
+var commandEnvironmentNames = map[string]bool{
+	// System.
+	"PATH": true, "HOME": true, "USER": true, "LOGNAME": true, "SHELL": true,
+	"TERM": true, "LANG": true, "LANGUAGE": true, "TZ": true, "NO_COLOR": true,
+	"CI": true, "TMPDIR": true, "TMP": true, "TEMP": true,
+	"XDG_CACHE_HOME": true, "XDG_CONFIG_HOME": true, "XDG_DATA_HOME": true, "XDG_STATE_HOME": true,
+	// Windows.
+	"SYSTEMROOT": true, "SYSTEMDRIVE": true, "WINDIR": true, "COMSPEC": true, "PATHEXT": true,
+	"USERPROFILE": true, "HOMEDRIVE": true, "HOMEPATH": true, "APPDATA": true, "LOCALAPPDATA": true,
+	"PROGRAMDATA": true, "PROGRAMFILES": true, "PROGRAMFILES(X86)": true,
+	"PROCESSOR_ARCHITECTURE": true, "NUMBER_OF_PROCESSORS": true, "OS": true,
+	// C toolchains.
+	"CC": true, "CXX": true, "CFLAGS": true, "CXXFLAGS": true, "LDFLAGS": true,
+	"PKG_CONFIG_PATH": true, "SDKROOT": true, "DEVELOPER_DIR": true,
+	// Go.
+	"GOROOT": true, "GOPATH": true, "GOBIN": true, "GOCACHE": true, "GOMODCACHE": true,
+	"GOFLAGS": true, "GOTOOLCHAIN": true, "CGO_ENABLED": true,
+	// Node, Python, Ruby, Rust and Java.
+	"NODE_PATH": true, "NVM_DIR": true, "PNPM_HOME": true,
+	"PYTHONPATH": true, "VIRTUAL_ENV": true, "GEM_HOME": true, "GEM_PATH": true,
+	"CARGO_HOME": true, "RUSTUP_HOME": true, "JAVA_HOME": true,
+}
+
+// commandEnvironment keeps the variables a command may see. Names compare
+// without regard to case because Windows treats them that way.
+func commandEnvironment(environment, extra []string) []string {
+	allowed := make(map[string]bool, len(extra))
+	for _, name := range extra {
+		allowed[strings.ToUpper(strings.TrimSpace(name))] = true
+	}
+	var kept []string
+	for _, value := range environment {
+		name, _, _ := strings.Cut(value, "=")
+		upper := strings.ToUpper(name)
+		if commandEnvironmentNames[upper] || allowed[upper] || strings.HasPrefix(upper, "LC_") {
+			kept = append(kept, value)
+		}
+	}
+	return kept
+}
+
+func executeWorkspaceCommand(ctx context.Context, executable string, args []string, directory string, extraEnvironment []string) (commandResult, error) {
 	command := exec.CommandContext(ctx, executable, args...)
 	command.Dir = directory
 	command.WaitDelay = 2 * time.Second
-	for _, value := range os.Environ() {
-		name, _, _ := strings.Cut(value, "=")
-		upper := strings.ToUpper(name)
-		if strings.Contains(upper, "API_KEY") || strings.Contains(upper, "TOKEN") || strings.Contains(upper, "SECRET") || strings.Contains(upper, "PASSWORD") {
-			continue
-		}
-		command.Env = append(command.Env, value)
-	}
+	command.Env = commandEnvironment(os.Environ(), extraEnvironment)
 	output := &boundedCommandOutput{}
 	command.Stdout, command.Stderr = output, output
 	cleanup, err := startCommandProcess(command)

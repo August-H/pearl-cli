@@ -120,9 +120,10 @@ func ConfigureOpenRouterAPIKey(apiKey string) (string, error) {
 	return environmentFile, nil
 }
 
-// EnsureAgentSettings copies a valid working-directory settings file into the
-// durable Pearl config directory. If Pearl is installed without one, it writes
-// conservative single-agent defaults.
+// EnsureAgentSettings returns Pearl's durable settings file, writing
+// conservative single-agent defaults if there is none. It never reads settings
+// from the working directory: the repository a user happens to be in must not
+// choose their model, limits or sandbox policy.
 func EnsureAgentSettings() (string, error) {
 	targets := pearlConfigFiles("settings.json", false)
 	if len(targets) == 0 {
@@ -138,16 +139,9 @@ func EnsureAgentSettings() (string, error) {
 		return "", err
 	}
 
-	var contents []byte
-	workingDirectorySettings, err := os.ReadFile("settings.json")
-	if err == nil {
-		contents = workingDirectorySettings
-	} else if !errors.Is(err, os.ErrNotExist) {
-		return "", err
-	} else {
-		contents = []byte(`{
+	contents := []byte(`{
   "username": "",
-  "model": "poolside/laguna-s-2.1:free",
+  "model": "` + FreeTierModel + `",
   "max_concurrency": 1,
   "max_depth": 30,
   "max_job_seconds": 1800,
@@ -158,22 +152,9 @@ func EnsureAgentSettings() (string, error) {
   "mode": "default"
 }
 `)
-	}
 	if err := validateSettings(contents); err != nil {
 		return "", fmt.Errorf("validate settings: %w", err)
 	}
-	// Import project preferences, but never let repository contents opt the
-	// user into command execution when the daemon first creates its settings.
-	var imported map[string]json.RawMessage
-	if err := json.Unmarshal(contents, &imported); err != nil {
-		return "", err
-	}
-	delete(imported, "allowed_commands")
-	contents, err = json.MarshalIndent(imported, "", "  ")
-	if err != nil {
-		return "", err
-	}
-	contents = append(contents, '\n')
 	if err := os.MkdirAll(filepath.Dir(target), 0o700); err != nil {
 		return "", err
 	}

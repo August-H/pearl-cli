@@ -27,7 +27,7 @@ func workspaceToolDefinitions() []map[string]any {
 		newAgentTool("search_files", "Search project text for a literal case-sensitive query. Returns paths, line numbers and snippets; use next_offset to continue.", search, "relative_path", "query"),
 		newAgentTool("create_directory", "Create a project directory and missing parents.", map[string]any{"relative_path": path}, "relative_path"),
 		newAgentTool("apply_patch", "Replace exactly one occurrence of old_text in a file. Read the file first; ambiguous or stale text is rejected.", map[string]any{"relative_path": path, "old_text": text, "new_text": text}, "relative_path", "old_text", "new_text"),
-		newAgentTool("run_command", "Run an executable from allowed_commands in Pearl settings, without a shell. It runs in a sandbox that can write only to the workspace, temp folders, and granted outside paths, and has no network unless the user allows it. Returns bounded combined output and exit code. Maximum timeout is 120 seconds.", map[string]any{
+		newAgentTool("run_command", "Run an executable from allowed_commands in Pearl settings, without a shell. It runs in a sandbox that can write only to the workspace, temp folders, and granted outside paths, and has no network unless the user allows it, apart from localhost, which stays available for local test servers. Returns bounded combined output and exit code. Maximum timeout is 120 seconds.", map[string]any{
 			"command": text, "args": map[string]any{"type": "array", "items": text}, "relative_path": path,
 			"timeout_seconds": map[string]any{"type": "integer", "minimum": 1, "maximum": 120},
 		}, "command", "args"),

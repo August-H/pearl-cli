@@ -18,6 +18,8 @@ type commandPolicy struct {
 	AllowUnsandboxed bool `json:"allow_unsandboxed_commands"`
 	// AllowNetwork lets sandboxed commands reach the network.
 	AllowNetwork bool `json:"allow_command_network"`
+	// AllowedEnv names extra environment variables commands may see.
+	AllowedEnv []string `json:"allowed_command_env"`
 }
 
 func loadCommandPolicy() (commandPolicy, error) {
@@ -98,6 +100,9 @@ func seatbeltProfile(s commandSandbox) string {
 	var profile strings.Builder
 	profile.WriteString("(version 1)\n(allow default)\n")
 	if !s.Network {
+		// Seatbelt can't scope loopback to the sandbox the way a Linux network
+		// namespace does, and test suites need it for their local servers. This
+		// leaves services already listening on localhost reachable on macOS.
 		profile.WriteString("(deny network-outbound (remote ip))\n(allow network-outbound (remote ip \"localhost:*\"))\n")
 	}
 	profile.WriteString("(deny file-write*)\n(allow file-write*\n")
