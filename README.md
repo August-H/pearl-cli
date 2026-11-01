@@ -170,6 +170,12 @@ Pearl's local function tools; hosted tools such as image generation, Code
 Interpreter, connectors, and tool search are unavailable on this route. See
 [OpenAI's preview limitations](https://developers.openai.com/siwc/token-sharing-open-source/preview-limitations).
 
+Native ChatGPT runs retry interrupted connections up to twice before any output
+has been displayed. If ChatGPT rejects saved response state, Pearl rebuilds the
+conversation once from saved messages and tool results, then saves the repaired
+history. Completed tool calls remain recorded. Authentication and usage-limit
+errors still require action; Pearl does not retry those automatically.
+
 `configure` asks for the OpenRouter API key and then offers the free router or
 a custom model ID. It stores the selection in the durable `settings.json`. The
 same wizard runs inside the dashboard command box when you enter `configure`.
@@ -195,6 +201,43 @@ dashboard to open the same picker. The catalog refreshes every time the command
 runs, with a cached list available if the refresh fails. Use `--list` to print
 the catalog, `--set <model-id>` to set a model directly, or `--free` to use the
 Free Tier.
+
+## Dashboard
+
+`pearl dashboard` opens a live terminal view of running, queued, and
+`waiting_input` jobs in the current workspace, with recent finished jobs below.
+Use `pearl --workspace <path>` to open the dashboard for another directory.
+Type any Pearl command at the prompt
+without the `pearl` prefix, such as `cancel <job-id>` or `respond <job-id>
+"answer"`. Commands that take a job ID, such as `run`, `attach`, `respond`,
+`cancel`, `retry`, and `jobs view`, list matching jobs as you type; press Tab
+to fill one in. Run `jobs` to open the selectable job list inside the dashboard; it
+shows the current directory by default and `jobs --all` shows every workspace.
+Press `a` inside the list to toggle between them. Enter opens the selected
+job, Space preloads its run, retry, or response command, and Esc returns to the
+list or dashboard. Type `archive` to browse archived jobs without leaving the
+dashboard. Enter `autonomous "goal"` to start an autonomous session, or enter
+`autonomous` to reopen the latest one. The autonomous screen updates in place.
+Press Esc to return to the main dashboard while the session keeps running. The
+dashboard returns after other commands finish. Type
+`exit` or `quit`, or press `Ctrl-C`, to close it. Set `NO_COLOR=1` to disable
+colors. Job suggestions also use the current workspace. Open `jobs --all` when
+you need a job from another directory.
+
+The composer wraps long drafts and keeps pasted newlines without submitting
+them. Press Alt+Enter to insert a newline, or Ctrl+E to edit the entire draft in
+`$VISUAL`, `$EDITOR`, or `vi`. Enter submits the draft. Quote multiline prompts
+as you would any argument, for example `respond <job-id> "first line` followed
+by the remaining lines and a closing quote. A command error keeps the draft.
+
+Each running job shows its recorded provider, model, harness, and test status.
+The composer labels the default model and harness separately; changing a default
+does not relabel a run already in progress. `jobs view <job-id>` includes these
+details and the test command. Tests start as `not run`, become `running` when a
+recognized test command starts, then `passed` or `failed` from its exit status.
+A later code edit clears an earlier result. Documentation edits keep the result.
+These states describe recognized test commands, not test coverage. Complex shell
+scripts whose test exit status cannot be established stay unverified.
 
 ## Jobs and directories
 
@@ -222,6 +265,24 @@ Zenity or KDialog when either is installed.
 ```bash
 pearl job "update the documentation" -n "fix docs" --directory
 ```
+
+### Paused jobs and follow-ups
+
+When the agent needs a decision, clarification, or authorization, it can pause
+the job in the `waiting_input` state. The question appears in the attached
+output. Respond and resume the same job with:
+
+```bash
+pearl respond <job-id> "your answer"
+```
+
+The response is added to the saved agent transcript, so the resumed run keeps
+the messages and completed tool calls from before the question. A waiting job
+does not occupy the worker; other queued jobs can continue in the meantime.
+
+`pearl respond` also works on completed, failed, interrupted, and cancelled
+jobs. The message is queued as a follow-up: Pearl jobs continue the saved
+conversation, and Codex jobs resume their Codex session.
 
 ## Folders
 
@@ -400,63 +461,6 @@ windows (amd64) with their SHA-256 checksums and attaches them to the release.
 The Makefile embeds the same version, commit, and date locally via
 `make build` or `make install`.
 
-`pearl dashboard` opens a live terminal view of running, queued, and
-`waiting_input` jobs in the current workspace, with recent finished jobs below.
-Use `pearl --workspace <path>` to open the dashboard for another directory.
-Type any Pearl command at the prompt
-without the `pearl` prefix, such as `cancel <job-id>` or `respond <job-id>
-"answer"`. Commands that take a job ID, such as `run`, `attach`, `respond`,
-`cancel`, `retry`, and `jobs view`, list matching jobs as you type; press Tab
-to fill one in. Run `jobs` to open the selectable job list inside the dashboard; it
-shows the current directory by default and `jobs --all` shows every workspace.
-Press `a` inside the list to toggle between them. Enter opens the selected
-job, Space preloads its run, retry, or response command, and Esc returns to the
-list or dashboard. Type `archive` to browse archived jobs without leaving the
-dashboard. Enter `autonomous "goal"` to start an autonomous session, or enter
-`autonomous` to reopen the latest one. The autonomous screen updates in place.
-Press Esc to return to the main dashboard while the session keeps running. The
-dashboard returns after other commands finish. Type
-`exit` or `quit`, or press `Ctrl-C`, to close it. Set `NO_COLOR=1` to disable
-colors. Job suggestions also use the current workspace. Open `jobs --all` when
-you need a job from another directory.
-
-The composer wraps long drafts and keeps pasted newlines without submitting
-them. Press Alt+Enter to insert a newline, or Ctrl+E to edit the entire draft in
-`$VISUAL`, `$EDITOR`, or `vi`. Enter submits the draft. Quote multiline prompts
-as you would any argument, for example `respond <job-id> "first line` followed
-by the remaining lines and a closing quote. A command error keeps the draft.
-
-Each running job shows its recorded provider, model, harness, and test status.
-The composer labels the default model and harness separately; changing a default
-does not relabel a run already in progress. `jobs view <job-id>` includes these
-details and the test command. Tests start as `not run`, become `running` when a
-recognized test command starts, then `passed` or `failed` from its exit status.
-A later code edit clears an earlier result. Documentation edits keep the result.
-These states describe recognized test commands, not test coverage. Complex shell
-scripts whose test exit status cannot be established stay unverified.
-
-Native ChatGPT runs retry interrupted connections up to twice before any output
-has been displayed. If ChatGPT rejects saved response state, Pearl rebuilds the
-conversation once from saved messages and tool results, then saves the repaired
-history. Completed tool calls remain recorded. Authentication and usage-limit
-errors still require action; Pearl does not retry those automatically.
-
-When the agent needs a decision, clarification, or authorization, it can pause
-the job in the `waiting_input` state. The question appears in the attached
-output. Respond and resume the same job with:
-
-```bash
-pearl respond <job-id> "your answer"
-```
-
-The response is added to the saved agent transcript, so the resumed run keeps
-the messages and completed tool calls from before the question. A waiting job
-does not occupy the worker; other queued jobs can continue in the meantime.
-
-`pearl respond` also works on completed, failed, interrupted, and cancelled
-jobs. The message is queued as a follow-up: Pearl jobs continue the saved
-conversation, and Codex jobs resume their Codex session.
-
 ## Autonomous mode
 
 `pearl autonomous "goal"` starts a persisted coordinator for the current
@@ -595,7 +599,9 @@ Queued jobs and schedules survive a restart automatically.
 
 ## Safety settings
 
-The generated settings use one agent and conservative bounds:
+Pearl writes these settings to its config directory on first run. It never reads
+a `settings.json` from the repository you're working in. They use one agent and
+conservative bounds:
 
 ```json
 {
@@ -661,10 +667,50 @@ Common credential environment variables are removed from the child environment.
 Commands are disabled when `allowed_commands` is absent or empty. Repository
 settings cannot grant this permission; only durable user settings are consulted.
 
-Enable this only for trusted projects: test/build programs execute repository
-code with your user permissions. The working-directory check is not an OS
-filesystem or network sandbox, and enabled programs can access resources outside
-the workspace. Use a separate container or restricted account for untrusted code.
+Commands run in an OS sandbox: `sandbox-exec` on macOS and bubblewrap (`bwrap`)
+on Linux. They can write only to the workspace, temp folders, per-user caches,
+and outside paths granted to the job. They can't read Pearl's own config or the
+credential folders in your home directory, but they can read most other files on
+the machine. They have no network access, except that on macOS they can still
+reach `localhost`, because test suites need it for their local servers. On Linux,
+they get a private network with its own `localhost`.
+
+Linux without bubblewrap and Windows have no sandbox, so commands fail there
+until you opt out. These settings go in the same user `settings.json`:
+
+```json
+"allow_unsandboxed_commands": true,
+"allow_command_network": true,
+"allowed_command_env": ["MY_BUILD_SETTING"]
+```
+
+`allow_unsandboxed_commands` runs commands without a sandbox where none is
+available, and `allow_command_network` gives sandboxed commands the network.
+
+Commands also get a reduced environment: the variables that system, C, Go, Node,
+Python, Ruby, Rust, and Java tools need, such as `PATH`, `HOME`, and `GOCACHE`.
+Everything else is withheld, including credentials such as `AWS_ACCESS_KEY_ID`
+and `DATABASE_URL`, and `SSH_AUTH_SOCK`. Use `allowed_command_env` to pass more
+variables through.
+
+Enable commands only for trusted projects: test and build programs execute
+repository code with your user permissions. Use a separate container or
+restricted account for untrusted code.
+
+### Access outside the workspace
+
+An agent that needs a path outside its workspace can request read or write access
+to it for the current job. The `outside_access` setting decides what happens:
+
+- `review` (the default): a separate model call with no tools approves or denies
+  the request based on the job's task.
+- `ask`: the job pauses until you answer. Only `y` or `yes` approves it; any other
+  answer denies it.
+- `deny`: every request is refused.
+
+Pearl treats any other value as `deny`, so a typo can't weaken the setting. Paths
+that hold credentials or Pearl's own files are always refused. Pearl reads this
+setting only from your user `settings.json`.
 
 Incomplete model streams and token-limit responses fail the job instead of
 marking a partial answer completed. Streamed output remains in job events;
