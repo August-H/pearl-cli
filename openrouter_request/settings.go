@@ -1,4 +1,4 @@
-package config
+package openrouter_request
 
 type Settings struct {
 	AllowedCommands           []string `json:"allowed_commands,omitempty"`
@@ -6,6 +6,7 @@ type Settings struct {
 	Model                     string   `json:"model"`
 	Provider                  string   `json:"provider,omitempty"`
 	ChatGPTModel              string   `json:"chatgpt_model,omitempty"`
+	Harness                   string   `json:"harness,omitempty"`
 	Max_concurrency           int      `json:"max_concurrency"`
 	Max_depth                 int      `json:"max_depth"`
 	Mode                      string   `json:"mode"`
@@ -14,4 +15,13 @@ type Settings struct {
 	Context_compaction_tokens int      `json:"context_compaction_tokens"`
 	Context_keep_tokens       int      `json:"context_keep_tokens"`
 	Approved_workspace_roots  []string `json:"approved_workspace_roots"`
+}
+
+type Reasoning struct {
+	Enabled bool `json:"enabled"`
+}
+
+type APIError struct {
+	Code    any    `json:"code"`
+	Message string `json:"message"`
 }

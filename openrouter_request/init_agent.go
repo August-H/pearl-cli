@@ -164,40 +164,6 @@ type Tool struct {
 
 var sharedAgentHTTPClient = &http.Client{Timeout: 5 * time.Minute}
 
-// Init_agent sends a prompt to the configured model.
-func Init_agent(prompt string) (string, error) {
-	workspaceRoot, err := os.Getwd()
-	if err != nil {
-		return "", fmt.Errorf("resolve working directory: %w", err)
-	}
-	currentSection := ""
-	events := func(event AgentEvent) error {
-		if event.Type != "reasoning" && event.Type != "answer" {
-			if event.Type == "tool" {
-				fmt.Printf("[tool] %s\n", event.Data)
-			}
-			return nil
-		}
-		if currentSection != event.Type {
-			if currentSection != "" {
-				fmt.Println()
-			}
-			fmt.Printf("[%s]\n", event.Type)
-			currentSection = event.Type
-		}
-		fmt.Print(event.Data)
-		return nil
-	}
-	result, err := Run(context.Background(), prompt, RunOptions{
-		WorkspaceRoot: workspaceRoot,
-		Events:        events,
-	})
-	if currentSection != "" {
-		fmt.Println()
-	}
-	return result, err
-}
-
 // Run executes one durable agent job. The caller owns process lifecycle,
 // cancellation, event persistence, and checkpoint storage.
 func Run(ctx context.Context, prompt string, options RunOptions) (string, error) {

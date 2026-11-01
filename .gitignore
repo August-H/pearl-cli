@@ -3,3 +3,10 @@ chatgpt.json
 chatgpt.lock
 .chatgpt-*
 test-results/
+/pearl
+/pearl.old
+/pearl-cli
+/cmd/pearl/pearl-cli
+*.exe
+*.log
+.DS_Store
