@@ -7,13 +7,18 @@ LDFLAGS := -s -w \
 	-X $(MODULE)/cli.commit=$(COMMIT) \
 	-X $(MODULE)/cli.date=$(DATE)
 
-.PHONY: build install test
+.PHONY: build install test clean
 
 build:
 	go build -trimpath -ldflags "$(LDFLAGS)" -o pearl ./cmd/pearl
 
 install: build
+	mkdir -p "$$(go env GOPATH)/bin"
 	install -m 755 pearl "$$(go env GOPATH)/bin/pearl"
 
 test:
 	go vet ./... && go test ./...
+
+clean:
+	rm -f pearl
+	rm -rf test-results
