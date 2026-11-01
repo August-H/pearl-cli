@@ -4,6 +4,8 @@ type Settings struct {
 	AllowedCommands           []string `json:"allowed_commands,omitempty"`
 	Username                  string   `json:"username"`
 	Model                     string   `json:"model"`
+	Provider                  string   `json:"provider,omitempty"`
+	ChatGPTModel              string   `json:"chatgpt_model,omitempty"`
 	Max_concurrency           int      `json:"max_concurrency"`
 	Max_depth                 int      `json:"max_depth"`
 	Mode                      string   `json:"mode"`

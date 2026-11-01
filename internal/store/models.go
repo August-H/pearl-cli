@@ -34,22 +34,26 @@ func NormalizeHarness(name string) (string, error) {
 }
 
 type Job struct {
-	ID              string     `json:"id"`
-	Prompt          string     `json:"prompt"`
-	WorkspaceRoot   string     `json:"workspace_root"`
-	Harness         string     `json:"harness,omitempty"`
-	Folder          string     `json:"folder,omitempty"`
-	Status          string     `json:"status"`
-	Result          string     `json:"result,omitempty"`
-	Error           string     `json:"error,omitempty"`
-	CancelRequested bool       `json:"cancel_requested"`
-	Question        string     `json:"question,omitempty"`
-	InputToolCallID string     `json:"-"`
-	InputResponse   string     `json:"-"`
-	CreatedAt       time.Time  `json:"created_at"`
-	StartedAt       *time.Time `json:"started_at,omitempty"`
-	FinishedAt      *time.Time `json:"finished_at,omitempty"`
-	ArchivedAt      *time.Time `json:"archived_at,omitempty"`
+	ID                  string     `json:"id"`
+	Prompt              string     `json:"prompt"`
+	WorkspaceRoot       string     `json:"workspace_root"`
+	Harness             string     `json:"harness,omitempty"`
+	Provider            string     `json:"provider,omitempty"`
+	Model               string     `json:"model,omitempty"`
+	Verification        string     `json:"verification,omitempty"`
+	VerificationCommand string     `json:"verification_command,omitempty"`
+	Folder              string     `json:"folder,omitempty"`
+	Status              string     `json:"status"`
+	Result              string     `json:"result,omitempty"`
+	Error               string     `json:"error,omitempty"`
+	CancelRequested     bool       `json:"cancel_requested"`
+	Question            string     `json:"question,omitempty"`
+	InputToolCallID     string     `json:"-"`
+	InputResponse       string     `json:"-"`
+	CreatedAt           time.Time  `json:"created_at"`
+	StartedAt           *time.Time `json:"started_at,omitempty"`
+	FinishedAt          *time.Time `json:"finished_at,omitempty"`
+	ArchivedAt          *time.Time `json:"archived_at,omitempty"`
 }
 
 func (j Job) Terminal() bool {

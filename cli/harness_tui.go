@@ -30,7 +30,7 @@ type harnessPickerState struct {
 func availableHarnesses() []harnessOption {
 	codex := harnessOption{
 		name: store.HarnessCodex, label: "Codex",
-		description: "OpenAI's Codex CLI, using your OpenRouter model",
+		description: "OpenAI's Codex CLI, using your selected provider and model",
 	}
 	if _, err := daemon.FindCodex(); err != nil {
 		codex.unavailable = "not installed: run pearl codex install"

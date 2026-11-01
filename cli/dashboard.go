@@ -69,6 +69,8 @@ type dashboardCommandView struct {
 	recalling     bool
 	model         string
 	harness       string
+	provider      string
+	workspace     string
 }
 
 const dashboardHistoryLimit = 100
@@ -204,6 +206,12 @@ var dashboardCommandOptions = []dashboardCommandSuggestion{
 	{usage: "daemon restart", completion: "daemon restart", description: "Restart the daemon"},
 	{usage: "daemon install", completion: "daemon install", description: "Start Pearl at login"},
 	{usage: "daemon uninstall", completion: "daemon uninstall", description: "Remove the login service"},
+	{usage: "auth login chatgpt", completion: "auth login chatgpt", description: "Link your ChatGPT plan"},
+	{usage: "auth status", completion: "auth status", description: "Show the linked ChatGPT account"},
+	{usage: "auth accounts", completion: "auth accounts", description: "List ChatGPT accounts"},
+	{usage: "auth logout", completion: "auth logout", description: "Sign out of ChatGPT"},
+	{usage: "provider chatgpt", completion: "provider chatgpt", description: "Use your ChatGPT plan"},
+	{usage: "provider openrouter", completion: "provider openrouter", description: "Use OpenRouter"},
 	{usage: "help", completion: "help", description: "Show command help"},
 	{usage: "exit", completion: "exit", description: "Close the dashboard"},
 }
@@ -214,6 +222,8 @@ var dashboardConfigureModelOptions = []dashboardCommandSuggestion{
 }
 
 var dashboardCommandDescriptions = map[string]string{
+	"auth":       "Link and manage ChatGPT accounts",
+	"provider":   "Choose ChatGPT or OpenRouter",
 	"run":        "Run or retry a job",
 	"configure":  "Set the API key and model",
 	"model":      "Browse and set the model",
@@ -289,8 +299,8 @@ func dashboardLoop(
 	}
 	defer term.Restore(int(input.Fd()), terminalState)
 
-	fmt.Fprint(output, "\x1b[?1049h\x1b[?25l")
-	defer fmt.Fprint(output, jobsListMouseDisable, "\x1b[?25h\x1b[?1049l")
+	fmt.Fprint(output, "\x1b[?1049h\x1b[?25l\x1b[?2004h")
+	defer fmt.Fprint(output, jobsListMouseDisable, "\x1b[?2004l\x1b[?25h\x1b[?1049l")
 
 	sessionContext, cancelSession := context.WithCancel(ctx)
 	defer cancelSession()
@@ -298,11 +308,13 @@ func dashboardLoop(
 	var renderLock sync.Mutex
 	mouseEnabled := false
 	commandText := ""
+	editorOpen := false
 	notice := ""
 	selectedSuggestion := 0
 	var history dashboardHistory
 	currentModel := currentModelID()
 	currentHarness := daemon.DefaultHarness()
+	currentBillingProvider := currentProvider()
 	commandView := dashboardCommandView{}
 	configureAPIKey := ""
 	var commandCancel context.CancelFunc
@@ -355,6 +367,10 @@ func dashboardLoop(
 		renderLock.Lock()
 		defer renderLock.Unlock()
 		inputLock.Lock()
+		if editorOpen {
+			inputLock.Unlock()
+			return
+		}
 		archiveOpen := jobsView.open && jobsView.archived
 		jobsShowAll := jobsView.showAll
 		openFolder := jobsView.folder
@@ -366,9 +382,11 @@ func dashboardLoop(
 		if refreshJobs {
 			model := currentModelID()
 			harness := daemon.DefaultHarness()
+			provider := currentProvider()
 			inputLock.Lock()
 			currentModel = model
 			currentHarness = harness
+			currentBillingProvider = provider
 			inputLock.Unlock()
 			requestContext, cancel := context.WithTimeout(sessionContext, 2*time.Second)
 			if autonomousID != "" {
@@ -415,6 +433,7 @@ func dashboardLoop(
 			}
 		}
 		boardJobs, visibleLoadErr := loadJobs(archiveOpen)
+		boardJobs = filterJobsForWorkspace(boardJobs, dashboardWorkspace)
 		visibleEntries := entriesSnapshot(archiveOpen, jobsShowAll, openFolder)
 		width := readWidth()
 		height := dashboardHeight(input)
@@ -540,6 +559,8 @@ func dashboardLoop(
 		visibleCommandView.recalling = history.browsing
 		visibleCommandView.model = displayCurrentModel(currentModel)
 		visibleCommandView.harness = currentHarness
+		visibleCommandView.provider = currentBillingProvider
+		visibleCommandView.workspace = dashboardWorkspace
 		inputLock.Unlock()
 		frame := renderDashboardState(
 			boardJobs, time.Now(), width, color, visibleLoadErr, visibleCommand, visibleNotice,
@@ -621,6 +642,34 @@ func dashboardLoop(
 		character := result.character
 		if escapeSequence != "" {
 			escapeSequence += string(character)
+			if isComposerEscapePrefix(escapeSequence) {
+				continue
+			}
+			if escapeSequence == "\x1b[200~" {
+				escapeSequence = ""
+				pasted, pasteErr := readComposerPaste(reader)
+				inputLock.Lock()
+				if pasteErr != nil {
+					notice = pasteErr.Error()
+				} else if len(commandText)+len(pasted) > dashboardDraftLimit {
+					notice = "Draft exceeds 1 MB; paste was not added."
+				} else {
+					commandText += pasted
+					notice = ""
+					selectedSuggestion = 0
+				}
+				inputLock.Unlock()
+				draw(false)
+				continue
+			}
+			if escapeSequence == "\x1b\r" || escapeSequence == "\x1b\n" {
+				escapeSequence = ""
+				inputLock.Lock()
+				commandText += "\n"
+				inputLock.Unlock()
+				draw(false)
+				continue
+			}
 			action, complete := jobViewEscapeAction(escapeSequence)
 			if !complete {
 				continue
@@ -632,6 +681,7 @@ func dashboardLoop(
 			snapshotFolder := jobsView.folder
 			inputLock.Unlock()
 			suggestionJobs, _ := loadJobs(false)
+			suggestionJobs = filterJobsForWorkspace(suggestionJobs, dashboardWorkspace)
 			listEntries := entriesSnapshot(snapshotArchived, snapshotShowAll, snapshotFolder)
 			inputLock.Lock()
 			switch {
@@ -688,6 +738,7 @@ func dashboardLoop(
 		snapshotFolder := jobsView.folder
 		inputLock.Unlock()
 		suggestionJobs, _ := loadJobs(false)
+		suggestionJobs = filterJobsForWorkspace(suggestionJobs, dashboardWorkspace)
 		navigationEntries := entriesSnapshot(snapshotArchived, snapshotShowAll, snapshotFolder)
 		inputLock.Lock()
 		if modelView != nil {
@@ -961,6 +1012,40 @@ func dashboardLoop(
 		notice = ""
 		history.browsing = false
 		switch character {
+		case 5:
+			if commandView.configureStep != dashboardConfigureInactive {
+				inputLock.Unlock()
+				continue
+			}
+			original := commandText
+			editorOpen = true
+			inputLock.Unlock()
+			renderLock.Lock()
+			fmt.Fprint(output, jobsListMouseDisable, "\x1b[?2004l\x1b[?25h\x1b[?1049l")
+			restoreErr := term.Restore(int(input.Fd()), terminalState)
+			edited, editErr := original, restoreErr
+			if restoreErr == nil {
+				edited, editErr = editDashboardDraft(sessionContext, original, input, output)
+			}
+			_, rawErr := term.MakeRaw(int(input.Fd()))
+			fmt.Fprint(output, "\x1b[?1049h\x1b[?25l\x1b[?2004h")
+			renderLock.Unlock()
+			inputLock.Lock()
+			editorOpen = false
+			mouseEnabled = false
+			if editErr != nil {
+				notice = editErr.Error()
+			} else {
+				commandText = edited
+				notice = ""
+			}
+			if rawErr != nil {
+				inputLock.Unlock()
+				return false, rawErr
+			}
+			inputLock.Unlock()
+			draw(false)
+			continue
 		case escapeKey:
 			if commandView.configureStep != dashboardConfigureInactive {
 				configureAPIKey = ""
@@ -1085,7 +1170,7 @@ func dashboardLoop(
 			history.add(commandText)
 			if commandView.running {
 				notice = "Wait for the running command or press Ctrl-C to cancel it."
-				commandText, selectedSuggestion = "", 0
+				selectedSuggestion = 0
 				inputLock.Unlock()
 				draw(false)
 				continue
@@ -1093,7 +1178,7 @@ func dashboardLoop(
 			parsed, parseErr := parseDashboardCommand(commandText)
 			if parseErr != nil {
 				notice = parseErr.Error()
-				commandText, selectedSuggestion = "", 0
+				selectedSuggestion = 0
 				inputLock.Unlock()
 				draw(false)
 				continue
@@ -1250,7 +1335,7 @@ func dashboardLoop(
 					commandCancel = cancel
 					commandView = dashboardCommandView{
 						command: strings.Join(parsed, " "), running: true,
-						output: "Loading models from OpenRouter...\n",
+						output: "Loading models from " + currentBillingProvider + "...\n",
 					}
 					commandText, selectedSuggestion = "", 0
 					inputLock.Unlock()
@@ -1331,7 +1416,7 @@ func dashboardLoop(
 			// Accepted commands continue above; anything left was rejected.
 			commandText, selectedSuggestion = "", 0
 		default:
-			if !unicode.IsControl(character) && len([]rune(commandText)) < 4096 {
+			if !unicode.IsControl(character) && len(commandText) < dashboardDraftLimit {
 				commandText += string(character)
 				selectedSuggestion = 0
 			}
@@ -2159,6 +2244,9 @@ func renderDashboardState(
 	selectedSuggestion int,
 	commandView dashboardCommandView,
 ) string {
+	if commandView.workspace != "" {
+		jobs = filterJobsForWorkspace(jobs, commandView.workspace)
+	}
 	if width < 1 {
 		width = 1
 	}
@@ -2234,6 +2322,7 @@ func renderDashboardState(
 			}
 			if width > 2 {
 				fmt.Fprintf(&frame, "  %s\n", dashboardTruncate(dashboardText(job.Prompt), width-2))
+				fmt.Fprintf(&frame, "  %s\n", dashboardTruncate(jobRunDetails(job), width-2))
 			}
 			if job.Status == store.JobWaitingInput && job.Question != "" {
 				question := "Question: " + dashboardText(job.Question)
@@ -2248,6 +2337,36 @@ func renderDashboardState(
 			}
 		}
 	}
+	var recentJobs []store.Job
+	for _, job := range jobs {
+		if job.Status == store.JobCompleted || job.Status == store.JobFailed || job.Status == store.JobInterrupted {
+			recentJobs = append(recentJobs, job)
+		}
+	}
+	slices.SortFunc(recentJobs, func(a, b store.Job) int {
+		at, bt := a.CreatedAt, b.CreatedAt
+		if a.FinishedAt != nil {
+			at = *a.FinishedAt
+		}
+		if b.FinishedAt != nil {
+			bt = *b.FinishedAt
+		}
+		return bt.Compare(at)
+	})
+	recent := 0
+	for _, job := range recentJobs {
+		if job.Status != store.JobCompleted && job.Status != store.JobFailed && job.Status != store.JobInterrupted {
+			continue
+		}
+		if recent == 0 {
+			fmt.Fprintln(&frame, "\n"+dashboardTruncate("Recent work · respond <job-id> \"follow-up\"", width))
+		}
+		fmt.Fprintln(&frame, dashboardTruncate("  "+job.ID+" · "+job.Status+" · Tests: "+jobVerificationLabel(job), width))
+		recent++
+		if recent == 2 {
+			break
+		}
+	}
 
 	if commandView.command != "" {
 		fmt.Fprintln(&frame)
@@ -2258,7 +2377,7 @@ func renderDashboardState(
 	fmt.Fprint(&frame, renderDashboardComposer(
 		jobs, commandText, notice, width, color, selectedSuggestion, commandView.running,
 		commandView.configureStep, commandView.recalling, commandView.model, commandView.harness,
-		running, queued, waiting, loadErr == nil,
+		running, queued, waiting, loadErr == nil, commandView.provider,
 	))
 	return frame.String()
 }
@@ -2471,6 +2590,7 @@ func renderDashboardComposer(
 	model, harness string,
 	running, queued, waiting int,
 	daemonActive bool,
+	providers ...string,
 ) string {
 	var composer bytes.Buffer
 	displayText := commandText
@@ -2514,17 +2634,27 @@ func renderDashboardComposer(
 		plainContent += placeholder
 		styledContent += dashboardPaint(color, ansiDim, placeholder)
 	} else {
-		value := dashboardPromptText(displayText, max(0, innerWidth-3))
-		plainContent += value + "█"
-		styledContent += value + dashboardPaint(color, ansiDim, "█")
+		rows := composerRows(displayText, max(1, innerWidth-3), 6)
+		if configureStep != dashboardConfigureInactive {
+			rows = []string{dashboardPromptText(displayText, max(0, innerWidth-3))}
+		}
+		for index, row := range rows {
+			prefix := "  "
+			if index == 0 {
+				prefix = indicator
+			}
+			value := prefix + row
+			if index == len(rows)-1 {
+				value += "█"
+			}
+			padding := strings.Repeat(" ", max(0, innerWidth-len([]rune(value))))
+			fmt.Fprintf(&composer, "%s %s%s %s\n", dashboardPaint(color, ansiDim, "│"), value, padding, dashboardPaint(color, ansiDim, "│"))
+		}
 	}
-	padding := strings.Repeat(" ", max(0, innerWidth-len([]rune(plainContent))))
-	fmt.Fprintf(&composer, "%s %s%s %s\n",
-		dashboardPaint(color, ansiDim, "│"),
-		styledContent,
-		padding,
-		dashboardPaint(color, ansiDim, "│"),
-	)
+	if commandText == "" {
+		padding := strings.Repeat(" ", max(0, innerWidth-len([]rune(plainContent))))
+		fmt.Fprintf(&composer, "%s %s%s %s\n", dashboardPaint(color, ansiDim, "│"), styledContent, padding, dashboardPaint(color, ansiDim, "│"))
+	}
 	var suggestions []dashboardCommandSuggestion
 	if !recalling {
 		suggestions = dashboardComposerSuggestionsWithJobs(commandText, configureStep, jobs)
@@ -2567,10 +2697,13 @@ func renderDashboardComposer(
 	if model != "" || harness != "" {
 		var details []string
 		if model != "" {
-			details = append(details, "Current model: "+model)
+			details = append(details, "Default model: "+model)
 		}
 		if harness != "" {
-			details = append(details, "Harness: "+harness)
+			details = append(details, "Default harness: "+harness)
+		}
+		if len(providers) > 0 && providers[0] != "" {
+			details = append([]string{"Billing: " + providers[0]}, details...)
 		}
 		fmt.Fprintln(&composer, dashboardTruncate("  "+strings.Join(details, " · "), width))
 	}
@@ -2597,7 +2730,9 @@ func renderDashboardComposer(
 		)
 	}
 	if leftHint == "" {
-		return composer.String()
+		leftHint = "  Enter to run · Alt+Enter newline · Ctrl+E editor"
+	} else if configureStep == dashboardConfigureInactive && !commandRunning {
+		fmt.Fprintln(&composer, dashboardTruncate("  Alt+Enter newline · Ctrl+E editor · pasted newlines stay in draft", width))
 	}
 	rightHint := ""
 	if configureStep != dashboardConfigureInactive {

@@ -9,10 +9,49 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/August-H/pearl-cli/internal/store"
 	"github.com/August-H/pearl-cli/openrouter_request"
 )
+
+func TestCodexRunnerUsesLinkedChatGPTWithoutOpenRouter(t *testing.T) {
+	writeCodexTestConfig(t, `{"provider":"chatgpt","model":"openrouter/saved","chatgpt_model":"account-model","max_job_seconds":60}`)
+	t.Setenv("OPENROUTER_API_KEY", "")
+	directory := os.Getenv("PEARL_CONFIG_DIR")
+	if err := os.Remove(filepath.Join(directory, ".env")); err != nil {
+		t.Fatal(err)
+	}
+	credentials, _ := json.Marshal(map[string]any{"active_client_id": "oaiapp_test", "accounts": []any{map[string]any{"client_id": "oaiapp_test", "access_token": "oauth-secret", "scopes": "resource.invoke chatgpt.tokens.use.direct", "expires_at": time.Now().Add(time.Hour)}}})
+	if err := os.WriteFile(filepath.Join(directory, "chatgpt.json"), credentials, 0600); err != nil {
+		t.Fatal(err)
+	}
+	script, record := writeFakeCodex(t, []string{`{"type":"thread.started","thread_id":"thread-plan"}`, `{"type":"item.completed","item":{"id":"answer","type":"agent_message","text":"done"}}`, `{"type":"turn.completed"}`}, 0)
+	state, err := store.Open(filepath.Join(t.TempDir(), "pearl.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer state.Close()
+	workspace, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	job, err := state.CreatePendingJob(context.Background(), "", "do the task", workspace, store.HarnessCodex)
+	if err != nil {
+		t.Fatal(err)
+	}
+	answer, err := (CodexRunner{Executable: script}).Run(context.Background(), job, nil, state)
+	if err != nil || answer != "done" {
+		t.Fatalf("result=%q err=%v", answer, err)
+	}
+	args := readCodexRecord(t, record, ".args")
+	if !strings.Contains(args, `model_provider="chatgpt"`) || !strings.Contains(args, `model_providers.chatgpt.base_url="http://127.0.0.1:`) || !strings.Contains(args, "account-model") || strings.Contains(args, "openrouter/saved") {
+		t.Fatalf("wrong ChatGPT arguments: %s", args)
+	}
+	if key := readCodexRecord(t, record, ".key"); key == "" || key == "oauth-secret" {
+		t.Fatal("Codex received OAuth credentials instead of a loopback key")
+	}
+}
 
 func writeCodexTestConfig(t *testing.T, settings string) {
 	t.Helper()

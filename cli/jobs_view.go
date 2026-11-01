@@ -161,6 +161,16 @@ func buildJobViewSections(details jobDetails) ([]jobViewSection, error) {
 	}
 	overview = append(overview, "Directory: "+jobViewText(displayJobDirectory(job.WorkspaceRoot)))
 	overview = append(overview, "Harness: "+jobViewHarness(job))
+	if job.Provider != "" {
+		overview = append(overview, "Provider: "+job.Provider)
+	}
+	if job.Model != "" {
+		overview = append(overview, "Model: "+job.Model)
+	}
+	overview = append(overview, "Tests: "+jobVerificationLabel(job))
+	if job.VerificationCommand != "" {
+		overview = append(overview, "Test command: "+job.VerificationCommand)
+	}
 	sections := []jobViewSection{{
 		Title:    "Overview",
 		Summary:  job.Status,

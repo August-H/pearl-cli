@@ -61,6 +61,9 @@ func runModel(args []string) int {
 	}
 
 	if free {
+		if currentProvider() == openrouter_request.ProviderChatGPT {
+			return printError("Model", fmt.Errorf("--free is an OpenRouter option; run `pearl provider openrouter` first"))
+		}
 		return setModel(openrouter_request.FreeTierModel)
 	}
 	if setID != "" {
@@ -83,10 +86,30 @@ func currentModelID() string {
 	if err != nil {
 		return ""
 	}
-	return strings.TrimSpace(settings.Model)
+	return strings.TrimSpace(openrouter_request.AgentModel(settings))
+}
+
+func currentProvider() string {
+	settings, _ := openrouter_request.LoadAgentSettings()
+	return openrouter_request.AgentProvider(settings)
 }
 
 func setModel(id string) int {
+	if currentProvider() == openrouter_request.ProviderChatGPT {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		models, err := newChatGPTClient().Models(ctx)
+		if err != nil {
+			return printError("Model", err)
+		}
+		found := false
+		for _, m := range models {
+			found = found || m.ID == id
+		}
+		if !found {
+			return printError("Model", fmt.Errorf("model %q is not in this ChatGPT account's catalog; run `pearl model --list`", id))
+		}
+	}
 	settingsPath, err := openrouter_request.ConfigureAgentModel(id)
 	if err != nil {
 		return printError("Model", err)
@@ -99,6 +122,14 @@ func setModel(id string) int {
 func resolveModelCatalogue(ctx context.Context, refresh bool) ([]openrouter_request.OpenRouterModel, bool, time.Time, error) {
 	ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
 	defer cancel()
+	if currentProvider() == openrouter_request.ProviderChatGPT {
+		models, err := newChatGPTClient().Models(ctx)
+		var result []openrouter_request.OpenRouterModel
+		for _, m := range models {
+			result = append(result, openrouter_request.OpenRouterModel{ID: m.ID, Name: m.Name, ContextLength: m.ContextWindow})
+		}
+		return result, false, time.Time{}, err
+	}
 	return openrouter_request.ResolveModels(ctx, refresh)
 }
 
@@ -119,7 +150,7 @@ func listModels(currentID string, refresh bool) int {
 }
 
 func printGroupedModels(models []openrouter_request.OpenRouterModel, currentID string) {
-	rows := buildModelRows(models, currentID)
+	rows := buildActiveModelRows(models, currentID)
 	for _, lab := range buildModelLabRows(rows) {
 		fmt.Println()
 		fmt.Println(modelLabTitle(lab))
@@ -158,7 +189,7 @@ func modelDisplayName(id, name string) string {
 }
 
 func pickModel(currentID string, refresh bool) int {
-	fmt.Println("Loading models from OpenRouter…")
+	fmt.Println("Loading models from", currentProvider()+"...")
 	picker, err := loadModelPicker(context.Background(), currentID, refresh)
 	if err != nil {
 		return printError("Model", err)
@@ -184,7 +215,18 @@ func loadModelPicker(ctx context.Context, currentID string, refresh bool) (*mode
 		notice = fmt.Sprintf("Could not refresh · cached list from %s",
 			fetchedAt.Local().Format("2006-01-02 15:04"))
 	}
-	return newModelPickerState(buildModelRows(models, currentID), currentID, notice), nil
+	return newModelPickerState(buildActiveModelRows(models, currentID), currentID, notice), nil
+}
+
+func buildActiveModelRows(models []openrouter_request.OpenRouterModel, currentID string) []modelRow {
+	if currentProvider() != openrouter_request.ProviderChatGPT {
+		return buildModelRows(models, currentID)
+	}
+	rows := []modelRow{{kind: modelRowHeader, provider: "openai"}}
+	for _, m := range models {
+		rows = append(rows, modelRow{kind: modelRowOption, provider: "openai", id: m.ID, name: m.Name, current: m.ID == currentID, context: openrouter_request.FormatContextLength(m.ContextLength), inputPrice: "ChatGPT plan", outputPrice: "ChatGPT plan"})
+	}
+	return rows
 }
 
 func dashboardModelPickerCommand(arguments []string) (interactive, refresh bool) {

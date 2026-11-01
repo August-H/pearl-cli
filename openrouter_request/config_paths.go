@@ -190,12 +190,30 @@ func ConfigureAgentModel(model string) (string, error) {
 	if model == "" {
 		return "", errors.New("model cannot be empty")
 	}
+	settings, err := LoadAgentSettings()
+	if err == nil && AgentProvider(settings) == ProviderChatGPT {
+		return configureAgentSetting("chatgpt_model", model)
+	}
 	return configureAgentSetting("model", model)
+}
+
+func ConfigureChatGPTModel(model string) (string, error) {
+	if strings.TrimSpace(model) == "" {
+		return "", errors.New("ChatGPT model cannot be empty")
+	}
+	return configureAgentSetting("chatgpt_model", strings.TrimSpace(model))
 }
 
 // ConfigureDefaultHarness sets the harness that runs jobs created without one.
 func ConfigureDefaultHarness(harness string) (string, error) {
 	return configureAgentSetting("harness", strings.TrimSpace(harness))
+}
+
+func ConfigureOpenRouterModel(model string) (string, error) {
+	if strings.TrimSpace(model) == "" {
+		return "", errors.New("model cannot be empty")
+	}
+	return configureAgentSetting("model", strings.TrimSpace(model))
 }
 
 func configureAgentSetting(key, value string) (string, error) {
@@ -240,6 +258,9 @@ func validateSettings(contents []byte) error {
 	}
 	if strings.TrimSpace(settings.Model) == "" {
 		return errors.New("model cannot be empty")
+	}
+	if provider := AgentProvider(settings); provider != ProviderOpenRouter && provider != ProviderChatGPT {
+		return errors.New("provider must be openrouter or chatgpt")
 	}
 	return nil
 }

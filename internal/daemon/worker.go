@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -10,6 +11,7 @@ import (
 	"time"
 
 	"github.com/August-H/pearl-cli/internal/store"
+	"github.com/August-H/pearl-cli/internal/verification"
 	"github.com/August-H/pearl-cli/openrouter_request"
 )
 
@@ -168,6 +170,17 @@ func (m *Manager) runJob(parent context.Context, job store.Job) {
 		_, err := m.store.AppendEvent(writeContext, job.ID, event.Type, event.Data)
 		return err
 	}
+	if settings, err := openrouter_request.LoadAgentSettings(); err == nil {
+		harness := job.Harness
+		if harness == "" {
+			harness = DefaultHarness()
+		}
+		data, _ := json.Marshal(map[string]string{"provider": openrouter_request.AgentProvider(settings), "model": openrouter_request.AgentModel(settings), "harness": harness})
+		if err := events(openrouter_request.AgentEvent{Type: "run_config", Data: string(data)}); err != nil {
+			m.finishJob(job.ID, store.JobFailed, "", err.Error())
+			return
+		}
+	}
 	result, err := m.runner.Run(jobContext, job, events, m.store)
 	if err == nil {
 		m.finishJob(job.ID, store.JobCompleted, result, "")
@@ -219,6 +232,9 @@ func (m *Manager) runJob(parent context.Context, job store.Job) {
 }
 
 func (m *Manager) finishJob(jobID, status, result, errorText string) {
+	if job, err := m.store.GetJob(context.Background(), jobID); err == nil && job.Verification == "running" {
+		_, _ = m.store.AppendEvent(context.Background(), jobID, "verification", verification.Event("failed", job.VerificationCommand))
+	}
 	var lastError error
 	for attempt := 0; attempt < 3; attempt++ {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)

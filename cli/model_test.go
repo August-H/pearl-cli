@@ -232,6 +232,9 @@ func TestDashboardModelCommandUsesPickerOnlyForBrowsing(t *testing.T) {
 func TestModelFreeSetsFreeTier(t *testing.T) {
 	configDirectory := t.TempDir()
 	t.Setenv("PEARL_CONFIG_DIR", configDirectory)
+	if _, err := openrouter_request.ConfigureProvider(openrouter_request.ProviderOpenRouter); err != nil {
+		t.Fatal(err)
+	}
 	output, exitCode := captureTestStdout(t, func() int {
 		return Run([]string{"model", "--free"})
 	})
@@ -249,6 +252,9 @@ func TestModelFreeSetsFreeTier(t *testing.T) {
 func TestModelSetSavesCustomID(t *testing.T) {
 	configDirectory := t.TempDir()
 	t.Setenv("PEARL_CONFIG_DIR", configDirectory)
+	if _, err := openrouter_request.ConfigureProvider(openrouter_request.ProviderOpenRouter); err != nil {
+		t.Fatal(err)
+	}
 	output, exitCode := captureTestStdout(t, func() int {
 		return Run([]string{"model", "--set", "anthropic/claude-fable-5.1"})
 	})

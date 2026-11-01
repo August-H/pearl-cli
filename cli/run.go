@@ -3,6 +3,7 @@ package cli
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -18,6 +19,7 @@ import (
 
 	"github.com/August-H/pearl-cli/internal/daemon"
 	"github.com/August-H/pearl-cli/internal/store"
+	"github.com/August-H/pearl-cli/internal/verification"
 	"github.com/August-H/pearl-cli/openrouter_request"
 	"golang.org/x/term"
 )
@@ -42,6 +44,9 @@ Usage:
     remove <name>                                          Remove a folder and keep its jobs
   pearl run [--detach] <job-id>                            Run or retry a job
   pearl configure                                          Set the API key and model
+  pearl auth login chatgpt                                 Link your ChatGPT plan
+  pearl auth [status|accounts|use <id>|logout]              Manage linked ChatGPT accounts
+  pearl provider [openrouter|chatgpt]                      Choose how model usage is billed
   pearl model [--list] [--set <model-id>] [--free]         Browse and set the model
   pearl harness [pearl|codex]                              Choose the default agent harness
   pearl codex [install]                                    Check or install Pearl's copy of Codex
@@ -80,8 +85,8 @@ jobs view, archive, and schedule list. Use <command> --help for command help.`
 
 func Run(args []string) int {
 	if len(args) >= 1 && args[0] == "--workspace" {
-		if len(args) < 3 {
-			return printError("Workspace", errors.New("usage: pearl --workspace <path> <command>"))
+		if len(args) < 2 {
+			return printError("Workspace", errors.New("usage: pearl --workspace <path> [command]"))
 		}
 		original, err := os.Getwd()
 		if err != nil {
@@ -129,6 +134,10 @@ func Run(args []string) int {
 	}
 
 	switch args[0] {
+	case "auth":
+		return runAuth(args[1:])
+	case "provider":
+		return runProvider(args[1:])
 	case "configure":
 		return runConfigure(args[1:])
 	case "model":
@@ -315,8 +324,11 @@ func saveOpenRouterConfiguration(apiKey, model string) (configureResult, error) 
 	if err != nil {
 		return configureResult{}, err
 	}
-	settingsPath, err := openrouter_request.ConfigureAgentModel(model)
+	settingsPath, err := openrouter_request.ConfigureOpenRouterModel(model)
 	if err != nil {
+		return configureResult{}, err
+	}
+	if _, err := openrouter_request.ConfigureProvider(openrouter_request.ProviderOpenRouter); err != nil {
 		return configureResult{}, err
 	}
 	return configureResult{
@@ -623,6 +635,25 @@ func attachWithClientAfter(client *daemonClient, jobID string, after int64) int 
 	var models []string
 	err := client.streamEvents(ctx, jobID, after, func(event store.Event) error {
 		switch event.Type {
+		case "run_config":
+			var config struct {
+				Provider string `json:"provider"`
+				Model    string `json:"model"`
+				Harness  string `json:"harness"`
+			}
+			if json.Unmarshal([]byte(event.Data), &config) == nil {
+				fmt.Printf("\n[run] %s · %s · Harness: %s\n", config.Provider, config.Model, config.Harness)
+				currentSection = ""
+			}
+		case "verification":
+			var check verification.Check
+			if json.Unmarshal([]byte(event.Data), &check) == nil && check.Status != "not_run" {
+				fmt.Printf("\n[tests] %s: %s\n", check.Status, dashboardText(check.Command))
+				currentSection = ""
+			}
+		case "recovery":
+			fmt.Printf("\n[recovery] %s\n", event.Data)
+			currentSection = ""
 		case "live":
 			live = true
 		case "reasoning", "answer":
@@ -700,6 +731,7 @@ func attachWithClientAfter(client *daemonClient, jobID string, after int64) int 
 		return printError("Job", err)
 	}
 	if job.Status == store.JobCompleted {
+		fmt.Println("Tests:", jobVerificationLabel(job))
 		return 0
 	}
 	if job.Status == store.JobWaitingInput {

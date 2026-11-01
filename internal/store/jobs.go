@@ -3,8 +3,10 @@ package store
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/August-H/pearl-cli/internal/verification"
 	"strings"
 	"time"
 )
@@ -356,7 +358,7 @@ func (s *Store) ClaimNextJob(ctx context.Context) (Job, bool, error) {
 
 	started := time.Now().UTC()
 	result, err := transaction.ExecContext(ctx, `
-UPDATE jobs SET status = ?, started_at = ?, finished_at = NULL, error = ''
+UPDATE jobs SET status = ?, started_at = ?, finished_at = NULL, error = '', verification = '', verification_command = '', provider = '', model = ''
 WHERE id = ? AND status = ?`, JobRunning, started.Format(time.RFC3339Nano), job.ID, JobQueued)
 	if err != nil {
 		return Job{}, false, err
@@ -373,6 +375,7 @@ WHERE id = ? AND status = ?`, JobRunning, started.Format(time.RFC3339Nano), job.
 	}
 	job.Status = JobRunning
 	job.StartedAt = &started
+	job.Verification, job.VerificationCommand, job.Provider, job.Model = "", "", "", ""
 	return job, true, nil
 }
 
@@ -798,6 +801,43 @@ INSERT INTO events(job_id, type, data, created_at) VALUES (?, ?, ?, ?)`,
 }
 
 func (s *Store) AppendEvent(ctx context.Context, jobID, eventType, data string) (int64, error) {
+	if eventType == "verification" || eventType == "run_config" || eventType == "model" {
+		transaction, err := s.db.BeginTx(ctx, nil)
+		if err != nil {
+			return 0, err
+		}
+		defer transaction.Rollback()
+		switch eventType {
+		case "verification":
+			var check verification.Check
+			if err := json.Unmarshal([]byte(data), &check); err != nil {
+				return 0, err
+			}
+			if check.Status != "not_run" && check.Status != "running" && check.Status != "passed" && check.Status != "failed" {
+				return 0, errors.New("invalid verification status")
+			}
+			_, err = transaction.ExecContext(ctx, "UPDATE jobs SET verification = ?, verification_command = ? WHERE id = ?", check.Status, check.Command, jobID)
+		case "run_config":
+			var config struct {
+				Provider string `json:"provider"`
+				Model    string `json:"model"`
+			}
+			if err := json.Unmarshal([]byte(data), &config); err != nil {
+				return 0, err
+			}
+			_, err = transaction.ExecContext(ctx, "UPDATE jobs SET provider = ?, model = ? WHERE id = ?", config.Provider, config.Model, jobID)
+		case "model":
+			_, err = transaction.ExecContext(ctx, "UPDATE jobs SET model = ? WHERE id = ?", data, jobID)
+		}
+		if err != nil {
+			return 0, err
+		}
+		sequence, err := appendEventTx(ctx, transaction, jobID, eventType, data)
+		if err != nil {
+			return 0, err
+		}
+		return sequence, transaction.Commit()
+	}
 	result, err := s.db.ExecContext(ctx, `
 INSERT INTO events(job_id, type, data, created_at) VALUES (?, ?, ?, ?)`,
 		jobID, eventType, data, nowText())

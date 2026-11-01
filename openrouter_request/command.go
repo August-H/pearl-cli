@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/August-H/pearl-cli/internal/verification"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -50,6 +51,10 @@ func allowedCommands() ([]string, error) {
 }
 
 func runWorkspaceCommand(ctx context.Context, call agentToolCall, root string, access *outsideAccess) agentToolResult {
+	return runWorkspaceCommandWithEvents(ctx, call, root, access, nil)
+}
+
+func runWorkspaceCommandWithEvents(ctx context.Context, call agentToolCall, root string, access *outsideAccess, events EventSink) agentToolResult {
 	fail := func(err error) agentToolResult { return agentToolResult{Error: err.Error()} }
 	var input struct {
 		Command        string   `json:"command"`
@@ -112,6 +117,11 @@ func runWorkspaceCommand(ctx context.Context, call agentToolCall, root string, a
 	}
 	ctx, cancel := context.WithTimeout(ctx, time.Duration(input.TimeoutSeconds)*time.Second)
 	defer cancel()
+	if events != nil && verification.Command(input.Command, input.Args) {
+		if err := events(AgentEvent{Type: "verification", Data: verification.Event("running", strings.Join(append([]string{input.Command}, input.Args...), " "))}); err != nil {
+			return fail(err)
+		}
+	}
 	result, err := executeWorkspaceCommand(ctx, program, arguments, directory)
 	if err != nil {
 		return fail(err)

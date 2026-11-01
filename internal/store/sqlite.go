@@ -139,6 +139,10 @@ CREATE TABLE IF NOT EXISTS folders (
 		{name: "archived_at", definition: "TEXT"},
 		{name: "harness", definition: "TEXT NOT NULL DEFAULT ''"},
 		{name: "folder", definition: "TEXT NOT NULL DEFAULT ''"},
+		{name: "provider", definition: "TEXT NOT NULL DEFAULT ''"},
+		{name: "model", definition: "TEXT NOT NULL DEFAULT ''"},
+		{name: "verification", definition: "TEXT NOT NULL DEFAULT ''"},
+		{name: "verification_command", definition: "TEXT NOT NULL DEFAULT ''"},
 	} {
 		if err := s.ensureColumn(ctx, "jobs", column.name, column.definition); err != nil {
 			return err
@@ -227,6 +231,7 @@ func scanJob(scanner interface{ Scan(...any) error }) (Job, error) {
 		&job.Error, &cancelRequested, &job.Question, &job.InputToolCallID,
 		&job.InputResponse, &created, &started, &finished, &archived, &job.Harness,
 		&job.Folder,
+		&job.Provider, &job.Model, &job.Verification, &job.VerificationCommand,
 	)
 	if err != nil {
 		return Job{}, err
@@ -250,6 +255,6 @@ func scanJob(scanner interface{ Scan(...any) error }) (Job, error) {
 
 const jobColumns = `id, prompt, workspace_root, status, result, error,
 cancel_requested, input_question, input_tool_call_id, input_response,
-created_at, started_at, finished_at, archived_at, harness, folder`
+created_at, started_at, finished_at, archived_at, harness, folder, provider, model, verification, verification_command`
 
 func isNotFound(err error) bool { return errors.Is(err, sql.ErrNoRows) }

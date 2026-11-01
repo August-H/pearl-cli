@@ -1,2 +1,5 @@
 .env
+chatgpt.json
+chatgpt.lock
+.chatgpt-*
 test-results/

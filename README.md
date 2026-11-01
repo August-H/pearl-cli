@@ -1,6 +1,6 @@
 # Pearl CLI
 
-Pearl is an agent task manager. You can assign work as jobs, close the terminal, return later, and get information on the agent changes. Currently only supports OpenRouter. 
+Pearl is an agent task manager. You can assign work as jobs, close the terminal, return later, and get information on the agent changes. Use an eligible ChatGPT subscription or an OpenRouter API key.
 ## What Pearl does
 
 - Creates named jobs for a specific project directory.
@@ -39,7 +39,19 @@ The macOS and Linux script installs to `~/.local/bin` and tells you how to add
 it to `PATH` if needed. The Windows script installs to `%USERPROFILE%\bin` and
 adds that directory to your user PATH automatically.
 
-Then run the setup wizard and enter your OpenRouter API key:
+Link your ChatGPT account to use your plan in Pearl:
+
+```bash
+pearl auth login chatgpt
+pearl model
+```
+
+Complete sign-in and approve ChatGPT plan usage in your browser. Pearl selects
+a model from your account's catalog and switches to ChatGPT automatically.
+Eligible Plus and Pro accounts can use the allowance their plan makes available
+to connected apps. Account eligibility and usage limits are controlled by OpenAI.
+
+Or run the setup wizard and enter your OpenRouter API key:
 
 ```bash
 pearl configure
@@ -111,11 +123,58 @@ platform user config directory in a `pearl` subdirectory. Set
 `PEARL_CONFIG_DIR` to use a different location and `PEARL_SOCKET` to override
 only the Unix socket path.
 
+### ChatGPT accounts
+
+```bash
+pearl auth login chatgpt                 # Continue with ChatGPT in your browser
+pearl auth login chatgpt --no-browser    # Print the URL without opening a browser
+pearl auth status                        # Show the selected account and provider
+pearl auth accounts                      # List saved registrations and their IDs
+pearl auth login chatgpt --new-account   # Add another account or workspace
+pearl auth use <id>                      # Select a connected registration
+pearl auth login chatgpt --account <id>  # Reauthorize a saved registration
+pearl auth logout                        # Revoke the selected session and sign out
+pearl provider openrouter                # Switch to your saved OpenRouter model
+pearl provider chatgpt                   # Switch back to your connected account
+```
+
+Both harnesses and autonomous planning use the selected provider. The daemon
+reads the selection when a job starts; no restart is required. A running job
+keeps its original ChatGPT account. Provider changes apply to jobs that start
+afterward, including retries. OpenRouter and ChatGPT model preferences are saved
+separately. `pearl configure` selects OpenRouter again.
+
+With ChatGPT selected, `pearl model` and `pearl model --list` use the account's
+current catalog. `pearl model --set <slug>` selects one of those models.
+OpenRouter's Free Tier and catalog filters do not apply to ChatGPT.
+
+Pearl uses OpenAI's documented [Sign in with ChatGPT public-client flow](https://developers.openai.com/siwc/token-sharing-open-source/sign-in)
+and [Responses API route for plan usage](https://developers.openai.com/siwc/token-sharing-open-source/models-and-inference).
+It needs no proxy installation or API key. Sign-in uses a temporary callback on
+`127.0.0.1`; `--no-browser` still requires the browser to reach that callback.
+For SSH, forward the port shown in the URL's `redirect_uri` parameter, or sign
+in on the machine running Pearl. The attempt expires after five minutes.
+
+Credentials are kept in `chatgpt.json` in Pearl's user config directory, with
+owner-only file permissions on Unix. Pearl verifies the sign-in identity,
+refreshes tokens automatically, and keeps its credentials separate from Codex
+and other apps. Logout clears the selected account's tokens while retaining its
+registration for later sign-in. If revocation cannot be confirmed, Pearl reports
+that and still clears local tokens.
+
+ChatGPT plan limits apply to these requests. Manage the app's allowance and
+access in [ChatGPT usage settings](https://chatgpt.com/#settings/Usage).
+When a request reaches a limit, Pearl fails the job with an explanation. It does
+not switch billing providers automatically. The current OpenAI preview supports
+Pearl's local function tools; hosted tools such as image generation, Code
+Interpreter, connectors, and tool search are unavailable on this route. See
+[OpenAI's preview limitations](https://developers.openai.com/siwc/token-sharing-open-source/preview-limitations).
+
 `configure` asks for the OpenRouter API key and then offers the free router or
 a custom model ID. It stores the selection in the durable `settings.json`. The
 same wizard runs inside the dashboard command box when you enter `configure`.
 
-`pearl model` opens a lab menu for the OpenRouter model catalog, with batch
+With OpenRouter selected, `pearl model` opens a lab menu for its catalog, with batch
 variants, GPT Pro models, and media generation models hidden. The menu keeps
 text chat models, including those that accept images, and hides models that
 produce images, video, or audio. Only models added to OpenRouter within the past
@@ -218,8 +277,8 @@ next job that starts.
 
 A harness is the agent loop that does the work. Pearl ships its own, and it
 can also run jobs with the [Codex CLI](https://github.com/openai/codex). Both
-use the OpenRouter model and API key you set with `pearl model` and
-`pearl configure`.
+use the provider and model selected in Pearl. Link ChatGPT with
+`pearl auth login chatgpt`, or configure an OpenRouter API key with `pearl configure`.
 
 ```bash
 pearl job "fix the failing tests" --harness codex
@@ -252,7 +311,9 @@ when running the install script to skip Codex.
 
 Codex jobs run in Codex's `workspace-write` sandbox: commands can change files
 in the job directory but have no network access. Pearl ignores your
-`~/.codex/config.toml` for these runs so its OpenRouter settings apply. A
+`~/.codex/config.toml` for these runs so Pearl's provider settings apply. With
+ChatGPT, an authenticated loopback transport refreshes tokens for Codex without
+passing OAuth credentials to the child process. A
 retried Codex job resumes its Codex session.
 
 Pearl tells Codex to start its final message with `PEARL_QUESTION:` when it
@@ -340,7 +401,9 @@ The Makefile embeds the same version, commit, and date locally via
 `make build` or `make install`.
 
 `pearl dashboard` opens a live terminal view of running, queued, and
-`waiting_input` jobs from every workspace. Type any Pearl command at the prompt
+`waiting_input` jobs in the current workspace, with recent finished jobs below.
+Use `pearl --workspace <path>` to open the dashboard for another directory.
+Type any Pearl command at the prompt
 without the `pearl` prefix, such as `cancel <job-id>` or `respond <job-id>
 "answer"`. Commands that take a job ID, such as `run`, `attach`, `respond`,
 `cancel`, `retry`, and `jobs view`, list matching jobs as you type; press Tab
@@ -354,7 +417,29 @@ dashboard. Enter `autonomous "goal"` to start an autonomous session, or enter
 Press Esc to return to the main dashboard while the session keeps running. The
 dashboard returns after other commands finish. Type
 `exit` or `quit`, or press `Ctrl-C`, to close it. Set `NO_COLOR=1` to disable
-colors.
+colors. Job suggestions also use the current workspace. Open `jobs --all` when
+you need a job from another directory.
+
+The composer wraps long drafts and keeps pasted newlines without submitting
+them. Press Alt+Enter to insert a newline, or Ctrl+E to edit the entire draft in
+`$VISUAL`, `$EDITOR`, or `vi`. Enter submits the draft. Quote multiline prompts
+as you would any argument, for example `respond <job-id> "first line` followed
+by the remaining lines and a closing quote. A command error keeps the draft.
+
+Each running job shows its recorded provider, model, harness, and test status.
+The composer labels the default model and harness separately; changing a default
+does not relabel a run already in progress. `jobs view <job-id>` includes these
+details and the test command. Tests start as `not run`, become `running` when a
+recognized test command starts, then `passed` or `failed` from its exit status.
+A later code edit clears an earlier result. Documentation edits keep the result.
+These states describe recognized test commands, not test coverage. Complex shell
+scripts whose test exit status cannot be established stay unverified.
+
+Native ChatGPT runs retry interrupted connections up to twice before any output
+has been displayed. If ChatGPT rejects saved response state, Pearl rebuilds the
+conversation once from saved messages and tool results, then saves the repaired
+history. Completed tool calls remain recorded. Authentication and usage-limit
+errors still require action; Pearl does not retry those automatically.
 
 When the agent needs a decision, clarification, or authorization, it can pause
 the job in the `waiting_input` state. The question appears in the attached
@@ -465,7 +550,7 @@ Pearl daemon
     ├── SQLite jobs, events, transcripts, tool journal, schedules
     ├── scheduler ──► durable FIFO queue
     └── one worker
-           └── OpenRouter agent loop
+           └── Pearl or Codex agent loop, using ChatGPT or OpenRouter
                   └── workspace-scoped file tools
 ```
 

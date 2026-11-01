@@ -18,8 +18,10 @@ import (
 	"sync"
 	"time"
 
+	"github.com/August-H/pearl-cli/internal/chatgpt"
 	"github.com/August-H/pearl-cli/internal/codexinstall"
 	"github.com/August-H/pearl-cli/internal/store"
+	"github.com/August-H/pearl-cli/internal/verification"
 	"github.com/August-H/pearl-cli/internal/workspacepath"
 	"github.com/August-H/pearl-cli/openrouter_request"
 )
@@ -43,8 +45,7 @@ const (
 		codexQuestionMarker + " and I will answer.)"
 )
 
-// CodexRunner runs jobs with the Codex CLI, sending model requests to
-// OpenRouter with the model and API key configured in Pearl.
+// CodexRunner runs jobs with the Codex CLI using Pearl's selected provider.
 type CodexRunner struct {
 	Executable string
 	// OpenRouterURL overrides https://openrouter.ai, for tests.
@@ -94,7 +95,24 @@ func (r CodexRunner) Run(
 	if err != nil {
 		return "", err
 	}
-	apiKey, err := openrouter_request.LoadOpenRouterAPIKey()
+	apiKey := ""
+	var chatGPTAccount *chatgpt.Client
+	provider := openrouter_request.AgentProvider(settings)
+	switch provider {
+	case openrouter_request.ProviderOpenRouter:
+		apiKey, err = openrouter_request.LoadOpenRouterAPIKey()
+	case openrouter_request.ProviderChatGPT:
+		chatGPTAccount, err = chatgpt.NewClient().Pin(ctx)
+		if err == nil {
+			_, err = chatGPTAccount.AccessToken(ctx)
+		}
+		settings.Model = openrouter_request.AgentModel(settings)
+		if settings.Model == "" {
+			return "", errors.New("choose a ChatGPT model with `pearl model`")
+		}
+	default:
+		return "", errors.New("unknown model provider")
+	}
 	if err != nil {
 		return "", err
 	}
@@ -166,22 +184,37 @@ func (r CodexRunner) Run(
 	baseURL := upstream + "/api/v1"
 	var modelLock sync.Mutex
 	lastModel := ""
-	proxy, err := startCodexModelProxy(upstream, func(model string) {
+	reportModel := func(model string) {
 		modelLock.Lock()
 		defer modelLock.Unlock()
 		if model != lastModel {
 			lastModel = model
 			_ = lockedEvents(openrouter_request.AgentEvent{Type: "model", Data: model})
 		}
-	})
-	if err == nil {
-		defer proxy.close()
-		baseURL = proxy.baseURL()
+	}
+	if provider == openrouter_request.ProviderChatGPT {
+		proxy, err := chatGPTAccount.StartProxy(ctx)
+		if err != nil {
+			return "", fmt.Errorf("start ChatGPT transport: %w", err)
+		}
+		defer proxy.Close()
+		baseURL = proxy.BaseURL()
+		apiKey = proxy.Key
+		reportModel(settings.Model)
+	} else {
+		proxy, err := startCodexModelProxy(upstream, reportModel)
+		if err == nil {
+			defer proxy.close()
+			baseURL = proxy.baseURL()
+		}
 	}
 
-	command := exec.CommandContext(ctx, executable, codexArguments(
-		strings.TrimSpace(settings.Model), codexContextWindow(settings.Model), threadID, baseURL,
-	)...)
+	contextWindow := int64(0)
+	if provider == openrouter_request.ProviderOpenRouter {
+		contextWindow = codexContextWindow(settings.Model)
+	}
+	arguments := codexArgumentsForProvider(strings.TrimSpace(settings.Model), contextWindow, threadID, baseURL, provider)
+	command := exec.CommandContext(ctx, executable, arguments...)
 	command.Dir = job.WorkspaceRoot
 	command.Env = append(os.Environ(), codexAPIKeyEnvironment+"="+apiKey)
 	command.Stdin = strings.NewReader(prompt + codexQuestionReminder)
@@ -345,6 +378,10 @@ func codexDeveloperInstructions(skills []openrouter_request.Skill) string {
 }
 
 func codexArguments(model string, contextWindow int64, threadID, baseURL string) []string {
+	return codexArgumentsForProvider(model, contextWindow, threadID, baseURL, openrouter_request.ProviderOpenRouter)
+}
+
+func codexArgumentsForProvider(model string, contextWindow int64, threadID, baseURL, provider string) []string {
 	skills, _ := openrouter_request.LoadSkills()
 	arguments := []string{"exec"}
 	if threadID != "" {
@@ -352,13 +389,23 @@ func codexArguments(model string, contextWindow int64, threadID, baseURL string)
 	}
 	arguments = append(arguments,
 		"--json", "--skip-git-repo-check", "--ignore-user-config",
-		"-c", `model_provider="openrouter"`,
-		"-c", `model_providers.openrouter.name="OpenRouter"`,
-		"-c", `model_providers.openrouter.base_url="`+baseURL+`"`,
-		"-c", `model_providers.openrouter.env_key="`+codexAPIKeyEnvironment+`"`,
-		"-c", `model_providers.openrouter.wire_api="responses"`,
 		"-c", "developer_instructions="+codexTOMLString(codexDeveloperInstructions(skills)),
 	)
+	name := "OpenRouter"
+	if provider == openrouter_request.ProviderChatGPT {
+		name = "ChatGPT plan"
+	}
+	for _, setting := range []string{
+		"model_provider=" + codexTOMLString(provider),
+		"model_providers." + provider + ".name=" + codexTOMLString(name),
+		"model_providers." + provider + ".base_url=" + codexTOMLString(baseURL),
+		"model_providers." + provider + ".env_key=" + codexTOMLString(codexAPIKeyEnvironment),
+		"model_providers." + provider + `.wire_api="responses"`,
+		"model_providers." + provider + `.requires_openai_auth=false`,
+		"model_providers." + provider + `.supports_websockets=false`,
+	} {
+		arguments = append(arguments, "-c", setting)
+	}
 	arguments = append(arguments, codexPermissionArguments()...)
 	if contextWindow > 0 {
 		arguments = append(arguments, "-c", "model_context_window="+strconv.FormatInt(contextWindow, 10))
@@ -537,6 +584,11 @@ func (p *codexEventParser) handle(event codexEvent) error {
 				p.startedEvents = make(map[string]bool)
 			}
 			p.startedEvents[event.Item.ID] = true
+			if command := codexDisplayCommand(event.Item.Command); verification.Shell(command) {
+				if err := p.emit("verification", verification.Event("running", command)); err != nil {
+					return err
+				}
+			}
 			return p.emit("tool", "shell: "+codexDisplayCommand(event.Item.Command))
 		}
 	case "item.completed":
@@ -593,11 +645,25 @@ func (p *codexEventParser) completeItem(item codexItem) error {
 			}
 		}
 		arguments, _ := json.Marshal(map[string]string{"command": command})
+		if verification.Shell(command) {
+			status := "failed"
+			if success {
+				status = "passed"
+			}
+			if err := p.emit("verification", verification.Event(status, command)); err != nil {
+				return err
+			}
+		}
 		return p.recordTool(item.ID, "run_command", string(arguments),
 			codexTruncate(item.AggregatedOutput), success, failure)
 	case "file_change":
 		success := item.Status == "" || item.Status == "completed"
 		for index, change := range item.Changes {
+			if verification.AffectsTests(change.Path) {
+				if err := p.emit("verification", verification.Event("not_run", "")); err != nil {
+					return err
+				}
+			}
 			name := "apply_patch"
 			switch change.Kind {
 			case "add":
@@ -701,7 +767,7 @@ func (p *codexEventParser) emit(eventType, data string) error {
 	return nil
 }
 
-var codexShellWrapper = regexp.MustCompile(`(?s)^\S*/(?:ba|z)?sh -lc (.+)$`)
+var codexShellWrapper = regexp.MustCompile(`(?s)^\S*/(?:ba|z)?sh -l?c (.+)$`)
 
 // codexDisplayCommand removes the login-shell wrapper Codex adds to commands.
 func codexDisplayCommand(command string) string {

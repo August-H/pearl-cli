@@ -14,6 +14,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/August-H/pearl-cli/internal/chatgpt"
+	"github.com/August-H/pearl-cli/internal/verification"
 	"github.com/August-H/pearl-cli/internal/workspacepath"
 )
 
@@ -39,6 +41,11 @@ type agentMessage struct {
 	// Model is the model OpenRouter routed the request to. It is never sent
 	// back in requests or stored in the transcript.
 	Model string `json:"-"`
+	// Persist complete Responses output, including encrypted reasoning, for replay.
+	ResponsesOutput    []json.RawMessage `json:"responses_output,omitempty"`
+	ResponsesAccountID string            `json:"responses_account_id,omitempty"`
+	Phase              string            `json:"phase,omitempty"`
+	ResponsesRebuilt   bool              `json:"-"`
 }
 
 type agentStreamToolCall struct {
@@ -198,12 +205,28 @@ func Run(ctx context.Context, prompt string, options RunOptions) (string, error)
 		return "", errors.New("prompt cannot be empty")
 	}
 
-	apiKey, err := loadOpenRouterAPIKey()
+	settings, err := loadAgentSettings()
 	if err != nil {
 		return "", err
 	}
-
-	settings, err := loadAgentSettings()
+	apiKey := ""
+	switch AgentProvider(settings) {
+	case ProviderOpenRouter:
+		apiKey, err = loadOpenRouterAPIKey()
+	case ProviderChatGPT:
+		var account *chatgpt.Client
+		account, err = chatgpt.NewClient().Pin(ctx)
+		if err == nil {
+			_, err = account.AccessToken(ctx)
+			ctx = context.WithValue(ctx, providerContextKey{}, account)
+		}
+		settings.Model = AgentModel(settings)
+		if settings.Model == "" {
+			return "", errors.New("choose a ChatGPT model with `pearl model`")
+		}
+	default:
+		return "", errors.New("unknown provider; run `pearl provider openrouter` or `pearl provider chatgpt`")
+	}
 	if err != nil {
 		return "", err
 	}
@@ -424,7 +447,11 @@ func Run(ctx context.Context, prompt string, options RunOptions) (string, error)
 		if err != nil {
 			return "", err
 		}
-		if strings.TrimSpace(settings.Model) == FreeTierModel && options.Events != nil &&
+		if assistantMessage.ResponsesRebuilt {
+			clearResponsesHistory(messages)
+			clearResponsesHistory(transcriptMessages)
+		}
+		if (strings.TrimSpace(settings.Model) == FreeTierModel || AgentProvider(settings) == ProviderChatGPT) && options.Events != nil &&
 			assistantMessage.Model != "" && assistantMessage.Model != routedModel {
 			routedModel = assistantMessage.Model
 			if err := options.Events(AgentEvent{Type: "model", Data: routedModel}); err != nil {
@@ -691,6 +718,16 @@ func requestAgentCompletionWithReasoning(
 	tools []map[string]any,
 	reasoningEnabled bool,
 ) (agentMessage, error) {
+	if _, ok := ctx.Value(providerContextKey{}).(*chatgpt.Client); ok {
+		return requestChatGPTCompletion(ctx, client, model, messages, events, tools)
+	}
+	// Responses replay state belongs only to ChatGPT, never to OpenRouter.
+	messages = append([]agentMessage(nil), messages...)
+	for i := range messages {
+		messages[i].ResponsesOutput = nil
+		messages[i].ResponsesAccountID = ""
+		messages[i].Phase = ""
+	}
 	payload := map[string]any{
 		"model":     model,
 		"messages":  messages,
@@ -1047,7 +1084,7 @@ func executeAgentTool(
 	} else if call.Function.Name == readSkillTool {
 		result = runReadSkillTool(ctx, call)
 	} else if call.Function.Name == "run_command" {
-		result = runWorkspaceCommand(ctx, call, workspaceRoot, options.access)
+		result = runWorkspaceCommandWithEvents(ctx, call, workspaceRoot, options.access, options.Events)
 	} else {
 		result = runFileTool(ctx, call, workspaceRoot, maxFileBytes, options.access)
 	}
@@ -1064,6 +1101,33 @@ func executeAgentTool(
 		}
 	}
 	if options.Events != nil {
+		if result.Success && (call.Function.Name == "write_to_file" || call.Function.Name == "apply_patch" || call.Function.Name == "create_file") {
+			var input struct {
+				Path string `json:"relative_path"`
+			}
+			_ = json.Unmarshal([]byte(call.Function.Arguments), &input)
+			if verification.AffectsTests(input.Path) {
+				if err := options.Events(AgentEvent{Type: "verification", Data: verification.Event("not_run", "")}); err != nil {
+					return agentMessage{}, err
+				}
+			}
+		}
+		if command, ok := result.Result.(commandResult); ok && call.Function.Name == "run_command" {
+			var input struct {
+				Command string   `json:"command"`
+				Args    []string `json:"args"`
+			}
+			_ = json.Unmarshal([]byte(call.Function.Arguments), &input)
+			if verification.Command(input.Command, input.Args) {
+				status := "failed"
+				if command.ExitCode == 0 && !command.TimedOut && !command.Cancelled {
+					status = "passed"
+				}
+				if err := options.Events(AgentEvent{Type: "verification", Data: verification.Event(status, strings.Join(append([]string{input.Command}, input.Args...), " "))}); err != nil {
+					return agentMessage{}, err
+				}
+			}
+		}
 		if err := options.Events(AgentEvent{Type: "tool_result", Data: string(content)}); err != nil {
 			return agentMessage{}, fmt.Errorf("emit tool result event: %w", err)
 		}

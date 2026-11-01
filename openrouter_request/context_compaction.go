@@ -98,15 +98,21 @@ func compactAgentContext(
 }
 
 func estimateContextTokens(messages []agentMessage, tools []map[string]any) int {
-	messageBytes, _ := json.Marshal(messages)
 	toolBytes, _ := json.Marshal(tools)
 	// Code, JSON, and tool output tend to tokenize more densely than prose.
 	// Three bytes per token is deliberately conservative, with a small fixed
 	// allowance for provider framing that is not represented in the payload.
-	return (len(messageBytes)+len(toolBytes)+2)/3 + 256
+	return estimateMessagesTokens(messages) + (len(toolBytes)+2)/3 + 256
 }
 
 func estimateMessagesTokens(messages []agentMessage) int {
+	// Replay output duplicates the readable message and contains opaque encrypted
+	// state. Counting its base64 bytes as text caused repeated early compaction.
+	messages = append([]agentMessage(nil), messages...)
+	for i := range messages {
+		messages[i].ResponsesOutput = nil
+		messages[i].ResponsesAccountID = ""
+	}
 	encoded, _ := json.Marshal(messages)
 	return (len(encoded) + 2) / 3
 }
@@ -172,6 +178,12 @@ func modelContextSummary(
 	model string,
 	messages []agentMessage,
 ) (string, bool) {
+	// Summarize readable history; encrypted Responses state is only for replay.
+	messages = append([]agentMessage(nil), messages...)
+	for i := range messages {
+		messages[i].ResponsesOutput = nil
+		messages[i].ResponsesAccountID = ""
+	}
 	encoded, err := json.Marshal(messages)
 	if err != nil {
 		return fallbackContextSummary(messages), true

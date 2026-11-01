@@ -10,7 +10,7 @@ import (
 	"github.com/August-H/pearl-cli/internal/store"
 )
 
-func TestRenderDashboardShowsOnlyActiveJobsWithColors(t *testing.T) {
+func TestRenderDashboardShowsActiveJobsAndRecentWork(t *testing.T) {
 	now := time.Date(2026, time.August, 18, 12, 30, 0, 0, time.UTC)
 	started := now.Add(-45 * time.Second)
 	jobs := []store.Job{
@@ -58,8 +58,8 @@ func TestRenderDashboardShowsOnlyActiveJobsWithColors(t *testing.T) {
 	if strings.Contains(output, "Pearl jobs") {
 		t.Fatalf("dashboard still uses the old title:\n%s", output)
 	}
-	if strings.Contains(output, "job_finished") || strings.Contains(output, "do not show this") {
-		t.Fatalf("dashboard included a finished job:\n%s", output)
+	if !strings.Contains(output, "job_finished · completed") || !strings.Contains(output, "Recent work") || strings.Contains(output, "do not show this") {
+		t.Fatalf("dashboard did not separate recent work from active jobs:\n%s", output)
 	}
 	if !strings.Contains(output, ansiGreen) || !strings.Contains(output, ansiYellow) ||
 		!strings.Contains(output, ansiMagenta) {
@@ -356,8 +356,8 @@ func TestRenderDashboardShowsCommandPromptAndNotice(t *testing.T) {
 	idle := renderDashboardWithInput(
 		nil, time.Date(2026, time.August, 19, 12, 30, 0, 0, time.UTC), 80, false, nil, "", "",
 	)
-	if !strings.HasSuffix(strings.TrimRight(idle, "\n"), "╯") {
-		t.Fatalf("idle dashboard prompt does not end at the input box:\n%s", idle)
+	if !strings.Contains(idle, "Ctrl+E editor") || !strings.Contains(idle, "Alt+Enter newline") {
+		t.Fatalf("idle dashboard does not explain draft editing:\n%s", idle)
 	}
 }
 
@@ -395,15 +395,15 @@ func TestRenderDashboardComposerShowsModelBelowInputBox(t *testing.T) {
 		output := renderDashboardComposer(nil, "", "", 80, color, 0, false,
 			dashboardConfigureInactive, false, "anthropic/claude-opus-5.5", "", 0, 0, 0, true)
 		lines := strings.Split(strings.TrimRight(output, "\n"), "\n")
-		last := lines[len(lines)-1]
-		if last != "  Current model: anthropic/claude-opus-5.5" || !strings.Contains(lines[len(lines)-2], "╯") {
+		modelLine := lines[len(lines)-2]
+		if modelLine != "  Default model: anthropic/claude-opus-5.5" || !strings.Contains(lines[len(lines)-3], "╯") {
 			t.Fatalf("color %v: model line is not plain text below the box:\n%q", color, lines)
 		}
 	}
 	output := renderDashboardComposer(nil, "", "", 80, false, 0, false,
 		dashboardConfigureInactive, false, "openrouter/free", "codex", 0, 0, 0, true)
 	lines := strings.Split(strings.TrimRight(output, "\n"), "\n")
-	if last := lines[len(lines)-1]; last != "  Current model: openrouter/free · Harness: codex" {
+	if last := lines[len(lines)-2]; last != "  Default model: openrouter/free · Default harness: codex" {
 		t.Fatalf("model and harness line = %q", last)
 	}
 }
@@ -495,7 +495,7 @@ func TestDashboardCommandSuggestionsFilterNavigateAndFill(t *testing.T) {
 		t.Fatalf("moving above the full command list selected %d, want %d", got, len(all)-1)
 	}
 	autonomous := dashboardCommandSuggestions("aut")
-	if len(autonomous) != 1 || autonomous[0].usage != "autonomous" {
+	if len(autonomous) != 2 || autonomous[0].usage != "autonomous" || autonomous[1].usage != "auth" {
 		t.Fatalf("autonomous top-level suggestions = %#v", autonomous)
 	}
 	resume := dashboardCommandSuggestions("autonomous --")
