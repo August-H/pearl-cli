@@ -78,7 +78,7 @@ Usage:
     install                                                Start it automatically at login
     uninstall                                              Remove the login service
 
-  pearl help                                               Show this help
+  pearl help [command]                                     Show this help or a command's help
 
 Inspection commands support --json: version, status, daemon status, jobs,
 jobs view, archive, and schedule list. Use <command> --help for command help.`
@@ -110,12 +110,20 @@ func Run(args []string) int {
 		return runDashboard(nil)
 	}
 	if args[0] == "help" {
-		if len(args) != 1 {
-			fmt.Fprintln(os.Stderr, "Usage: pearl help")
-			return 2
+		switch len(args) {
+		case 1:
+			fmt.Println(usage)
+			return 0
+		case 2:
+			return Run([]string{args[1], "--help"})
+		case 3:
+			// Only known pairs: a command such as "codex install" would run.
+			if commandHelp([]string{args[1], args[2], "--help"}) {
+				return 0
+			}
 		}
-		fmt.Println(usage)
-		return 0
+		fmt.Fprintln(os.Stderr, "Usage: pearl help [command]")
+		return 2
 	}
 	if args[0] == "-h" || args[0] == "--help" {
 		fmt.Println(usage)
@@ -438,7 +446,7 @@ func createJobWithDirectoryPicker(
 	pickDirectory func(string) (string, error),
 ) int {
 	flags := flag.NewFlagSet("job", flag.ContinueOnError)
-	flags.SetOutput(os.Stderr)
+	flags.SetOutput(flagOutput(args))
 	name := flags.String("n", "", "job ID, up to 20 characters")
 	flags.StringVar(name, "name", "", "job ID, up to 20 characters")
 	chooseDirectory := flags.Bool("d", false, "choose the job directory")
@@ -529,7 +537,7 @@ func createJobWithDirectoryPicker(
 
 func runJob(args []string) int {
 	flags := flag.NewFlagSet("run", flag.ContinueOnError)
-	flags.SetOutput(os.Stderr)
+	flags.SetOutput(flagOutput(args))
 	detach := flags.Bool("detach", false, "run without attaching")
 	flags.Usage = func() {
 		fmt.Fprintln(flags.Output(), "Usage: pearl run [--detach] <job-id>")
@@ -1035,7 +1043,7 @@ func runSchedule(args []string) int {
 		return 0
 	case "add":
 		flags := flag.NewFlagSet("schedule add", flag.ContinueOnError)
-		flags.SetOutput(os.Stderr)
+		flags.SetOutput(flagOutput(args[1:]))
 		every := flags.Duration("every", 0, "run interval, for example 30m or 24h")
 		name := flags.String("name", "scheduled task", "schedule name")
 		workspacePath := flags.String("workspace", "", "workspace directory path")

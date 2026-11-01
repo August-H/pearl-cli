@@ -33,7 +33,7 @@ type autonomousTUIState struct {
 
 func runAutonomous(args []string) int {
 	flags := flag.NewFlagSet("autonomous", flag.ContinueOnError)
-	flags.SetOutput(os.Stderr)
+	flags.SetOutput(flagOutput(args))
 	resume := flags.String("resume", "", "resume an autonomous session by ID")
 	workspacePath := flags.String("workspace", "", "workspace directory path for a new goal")
 	flags.Usage = func() {

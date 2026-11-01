@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"github.com/August-H/pearl-cli/internal/store"
+	"io"
 	"os"
 	"time"
 )
@@ -130,6 +131,16 @@ func extractJSONFlag(args []string) (bool, []string) {
 		}
 	}
 	return flag, rest
+}
+
+// flagOutput sends help the user asked for to stdout and usage errors to stderr.
+func flagOutput(args []string) io.Writer {
+	for _, argument := range args {
+		if argument == "-h" || argument == "-help" || argument == "--help" {
+			return os.Stdout
+		}
+	}
+	return os.Stderr
 }
 
 func commandHelp(args []string) bool {

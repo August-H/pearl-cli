@@ -43,7 +43,7 @@ type updateAsset struct {
 
 func runUpdate(args []string) int {
 	flags := flag.NewFlagSet("update", flag.ContinueOnError)
-	flags.SetOutput(os.Stderr)
+	flags.SetOutput(flagOutput(args))
 	checkOnly := flags.Bool("check", false, "report the latest release without installing it")
 	force := flags.Bool("force", false, "install even when not newer or built from source")
 	flags.Usage = func() {

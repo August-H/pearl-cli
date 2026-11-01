@@ -973,3 +973,40 @@ func socketTempDir(t *testing.T, prefix string) string {
 	t.Cleanup(func() { _ = os.RemoveAll(directory) })
 	return directory
 }
+
+func TestHelpTopicsPrintToStdout(t *testing.T) {
+	for _, topic := range [][]string{
+		{"help", "run"}, {"run", "--help"},
+		{"help", "job"}, {"job", "--help"},
+		{"help", "update"}, {"help", "autonomous"},
+		{"help", "attach"}, {"help", "daemon", "start"},
+		{"schedule", "add", "--help"},
+	} {
+		var output string
+		var exitCode int
+		errorOutput, _ := captureTestStderr(t, func() int {
+			output, exitCode = captureTestStdout(t, func() int { return Run(topic) })
+			return exitCode
+		})
+		if exitCode != 0 {
+			t.Errorf("%v exit code = %d", topic, exitCode)
+		}
+		if !strings.Contains(output, "pearl") {
+			t.Errorf("%v stdout = %q", topic, output)
+		}
+		if errorOutput != "" {
+			t.Errorf("%v stderr = %q", topic, errorOutput)
+		}
+	}
+}
+
+func TestHelpNeverRunsASubcommand(t *testing.T) {
+	for _, topic := range [][]string{
+		{"help", "codex", "install"}, {"help", "folder", "create"}, {"help", "a", "b", "c"},
+	} {
+		errorOutput, exitCode := captureTestStderr(t, func() int { return Run(topic) })
+		if exitCode != 2 || !strings.Contains(errorOutput, "Usage: pearl help") {
+			t.Errorf("%v exit code = %d, stderr = %q", topic, exitCode, errorOutput)
+		}
+	}
+}
