@@ -118,6 +118,19 @@ CREATE TABLE IF NOT EXISTS autonomous_jobs (
 CREATE INDEX IF NOT EXISTS autonomous_jobs_session
 ON autonomous_jobs(session_id, created_at);
 
+CREATE TABLE IF NOT EXISTS autonomous_turns (
+    session_id TEXT NOT NULL REFERENCES autonomous_sessions(id) ON DELETE CASCADE,
+    turn INTEGER NOT NULL,
+    trigger_text TEXT NOT NULL DEFAULT '',
+    reasoning TEXT NOT NULL DEFAULT '',
+    decision_bytes INTEGER NOT NULL DEFAULT 0,
+    outcome TEXT NOT NULL DEFAULT '',
+    updated_at TEXT,
+    started_at TEXT NOT NULL,
+    finished_at TEXT,
+    PRIMARY KEY(session_id, turn)
+);
+
 CREATE TABLE IF NOT EXISTS folders (
     name TEXT PRIMARY KEY,
     workspace_root TEXT NOT NULL,
@@ -143,8 +156,27 @@ CREATE TABLE IF NOT EXISTS folders (
 		{name: "model", definition: "TEXT NOT NULL DEFAULT ''"},
 		{name: "verification", definition: "TEXT NOT NULL DEFAULT ''"},
 		{name: "verification_command", definition: "TEXT NOT NULL DEFAULT ''"},
+		{name: "assigned_provider", definition: "TEXT NOT NULL DEFAULT ''"},
+		{name: "assigned_model", definition: "TEXT NOT NULL DEFAULT ''"},
 	} {
 		if err := s.ensureColumn(ctx, "jobs", column.name, column.definition); err != nil {
+			return err
+		}
+	}
+	for _, column := range []struct {
+		name       string
+		definition string
+	}{
+		{name: "orchestrator_provider", definition: "TEXT NOT NULL DEFAULT ''"},
+		{name: "orchestrator_model", definition: "TEXT NOT NULL DEFAULT ''"},
+		{name: "orchestrator_name", definition: "TEXT NOT NULL DEFAULT ''"},
+		{name: "allowed_models", definition: "TEXT NOT NULL DEFAULT ''"},
+		{name: "all_models", definition: "INTEGER NOT NULL DEFAULT 0"},
+		// Sessions from before this setting ran their jobs one at a time.
+		{name: "max_subagents", definition: "INTEGER NOT NULL DEFAULT 1"},
+		{name: "plan", definition: "TEXT NOT NULL DEFAULT ''"},
+	} {
+		if err := s.ensureColumn(ctx, "autonomous_sessions", column.name, column.definition); err != nil {
 			return err
 		}
 	}
@@ -232,6 +264,7 @@ func scanJob(scanner interface{ Scan(...any) error }) (Job, error) {
 		&job.InputResponse, &created, &started, &finished, &archived, &job.Harness,
 		&job.Folder,
 		&job.Provider, &job.Model, &job.Verification, &job.VerificationCommand,
+		&job.AssignedProvider, &job.AssignedModel,
 	)
 	if err != nil {
 		return Job{}, err
@@ -255,6 +288,7 @@ func scanJob(scanner interface{ Scan(...any) error }) (Job, error) {
 
 const jobColumns = `id, prompt, workspace_root, status, result, error,
 cancel_requested, input_question, input_tool_call_id, input_response,
-created_at, started_at, finished_at, archived_at, harness, folder, provider, model, verification, verification_command`
+created_at, started_at, finished_at, archived_at, harness, folder, provider, model, verification, verification_command,
+assigned_provider, assigned_model`
 
 func isNotFound(err error) bool { return errors.Is(err, sql.ErrNoRows) }

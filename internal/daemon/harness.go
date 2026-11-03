@@ -97,6 +97,9 @@ func harnessForProvider(provider string) string {
 // model's, including for retries. Answering a question or following up continues
 // the conversation in the harness that holds it, if it can still run.
 func resolveJobHarness(job store.Job) string {
+	if job.AssignedProvider != "" {
+		return harnessForProvider(job.AssignedProvider)
+	}
 	selected := DefaultHarness()
 	if job.Harness == "" || job.InputToolCallID == "" {
 		return selected

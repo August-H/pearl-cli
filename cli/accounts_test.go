@@ -85,10 +85,13 @@ func TestAccountsLabelsAPIKeys(t *testing.T) {
 	}
 	t.Setenv("OPENROUTER_API_KEY", "secret-key-value")
 	output, _ := captureTestStdout(t, func() int { return Run([]string{"accounts"}) })
-	for _, want := range []string{"API (Claude Code) · claude@example.com", "API (OpenRouter)", apiLimitsNote} {
+	for _, want := range []string{"API (Claude Code) · claude@example.com", apiLimitsNote} {
 		if !strings.Contains(output, want) {
 			t.Errorf("missing %q in:\n%s", want, output)
 		}
+	}
+	if strings.Contains(output, "OpenRouter") {
+		t.Errorf("OpenRouter was listed:\n%s", output)
 	}
 	if strings.Contains(output, "secret-key-value") {
 		t.Errorf("the API key was printed:\n%s", output)

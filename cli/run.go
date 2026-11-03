@@ -63,7 +63,7 @@ Usage:
   pearl status                                             Show daemon and queue status
   pearl update [--check]                                   Update Pearl to the latest release
   pearl version                                            Show the Pearl version
-  pearl autonomous [--resume <session-id>] ["goal"]        Run or resume an autonomous session TUI
+  pearl autonomous ["goal"] | --latest | --resume <id>     Start or open an autonomous session
 
   pearl schedule                                           Manage recurring jobs
     add --every <duration> [--name name] "prompt"           Run a prompt on an interval in this workspace

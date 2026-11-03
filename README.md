@@ -11,8 +11,8 @@ Pearl is an agent task manager. You can assign work as jobs, close the terminal,
 - Provides a terminal dashboard for running, retrying, answering, reviewing, and
   archiving jobs.
 - Supports recurring jobs through interval schedules.
-- Runs autonomous sessions where a coordinator creates subagent jobs, reviews
-  their results, and assigns follow-up work.
+- Runs autonomous sessions where an orchestrator starts subagent jobs on the models
+  it picks, reads their reports and test results, and assigns follow-up work.
 
 Pearl only calls the model while a job is running. An idle daemon does not use
 model tokens.
@@ -93,8 +93,9 @@ For a larger goal, start autonomous mode from the project directory:
 pearl autonomous "audit the release, fix the problems you find, and verify the result"
 ```
 
-Pearl opens a live TUI and keeps the coordinator in the daemon. Press Esc to
-detach. The session and its child jobs continue running.
+Pearl opens a box with the goal filled in, where you choose the models and how many
+subagents run at once. After you start it, a live screen follows the session in the
+daemon. Press Esc to detach. The session and its jobs keep running.
 
 ### Build from source
 
@@ -224,8 +225,8 @@ shows the current directory by default and `jobs --all` shows every workspace.
 Press `a` inside the list to toggle between them. Enter opens the selected
 job, Space preloads its run, retry, or response command, and Esc returns to the
 list or dashboard. Type `archive` to browse archived jobs without leaving the
-dashboard. Enter `autonomous "goal"` to start an autonomous session, or enter
-`autonomous` to reopen the latest one. The autonomous screen updates in place.
+dashboard. Enter `autonomous` to fill in a new autonomous session, or
+`autonomous --latest` to reopen the last one. The autonomous screen updates in place.
 Press Esc to return to the main dashboard while the session keeps running. The
 dashboard returns after other commands finish. Type
 `exit` or `quit`, or press `Ctrl-C`, to close it. Set `NO_COLOR=1` to disable
@@ -369,8 +370,8 @@ command.
 API billing has no plan limits to show. That includes OpenRouter, and Claude Code
 when `ANTHROPIC_API_KEY` is set.
 
-To see everything at once, run `pearl accounts`. It lists every account you're
-signed in to with its limits and marks the one in use. It's also a dashboard
+Run `pearl accounts` to list your ChatGPT, Claude and Gemini sign-ins with their
+limits and mark the one in use. OpenRouter API keys are omitted. It's also a dashboard
 command. A ChatGPT account that Codex isn't signed in to is listed without limits,
 because OpenAI only gives them to Codex's own login.
 
@@ -415,7 +416,7 @@ waiting for input, and `pearl respond <job-id> "answer"` sends your answer back
 into the same Codex session. Weaker models sometimes ask in plain text instead,
 in which case the job finishes with the question as its result. Codex also sends a
 much larger prompt with each request than Pearl's harness, which costs more on
-paid models. Autonomous mode always uses Pearl's harness for its own planning.
+paid models.
 
 ### Claude Code
 
@@ -497,7 +498,8 @@ pearl attach <job-id>
 pearl respond <job-id> "your answer"
 pearl cancel <job-id>
 pearl retry <job-id>
-pearl autonomous "goal"
+pearl autonomous ["goal"]
+pearl autonomous --latest
 pearl autonomous --resume <session-id>
 ```
 
@@ -558,28 +560,76 @@ The Makefile embeds the same version, commit, and date locally via
 
 ## Autonomous mode
 
-`pearl autonomous "goal"` starts a persisted coordinator for the current
-directory. Its jobs use the selected model. The coordinator itself plans with
-ChatGPT or OpenRouter, so with a Claude or Google model selected you also need one
-of those. The coordinator cannot edit files itself. It can create queued child
-jobs, wait for their agents, inspect every saved result or error, and create
-follow-up jobs. It finishes the session only after it reviews the child jobs and
-judges the goal complete.
+Run `pearl autonomous` in the project directory, or type `autonomous` in the
+dashboard, and fill in the box:
 
-The autonomous TUI lists every child job and keeps an activity feed built from
-the durable job status events. It records job creation and each transition such
-as `queued → running` and `running → completed`. The screen stays open after the
-session finishes until you press Esc.
+| Field | What it does |
+|---|---|
+| **Goal** | What the team should get done. `pearl autonomous "goal"` fills this in. |
+| **Repository** | The folder the jobs work in. It starts on the current directory. Type a path (`~` works), or press Ctrl+F to choose one in Finder, File Explorer on Windows, or zenity or kdialog on Linux. `--workspace <path>` fills this in. |
+| **Orchestrator Model** | The model that runs the session. It starts on your selected model. |
+| **Subagent Models Allowed** | Which models the orchestrator may assign. All your signed-in models by default. Open it to check only some. |
+| **Max Subagents** | How many jobs run at once, from 1 to 16. It starts at 3. |
 
-Detaching does not stop the coordinator. Run `pearl autonomous` to reopen the
-latest session, or `pearl autonomous --resume <session-id>` to open a specific
-one. If a child job asks for input, detach and answer it with:
+Use Tab or the arrow keys to move, Enter to open a list or go to the next field,
+and Ctrl+S to start from anywhere. In a list, type to search. Space checks a model
+for the subagents, and unchecking **All models** starts from an empty list.
+
+Once it starts, the orchestrator plans the work and starts jobs right away, using
+every free slot and choosing a model for each job. Each time a job reports back, the
+orchestrator reads its result and what happened with its tests, then starts whatever
+that calls for: a fix for a failure, the next step, or a check of the work. It
+finishes after every job has settled and it judges the goal met.
+
+Subagents can request follow-up jobs in their final reports by describing the issue
+and what needs doing. The orchestrator reviews each request, may accept, revise or
+decline it, and chooses the model for any job it starts. If a subagent is blocked,
+it returns its progress and request so the orchestrator can decide the next step.
+
+Any signed-in model can orchestrate, and each job runs on its assigned model's own
+harness, so one session can mix Claude Code, Codex and Antigravity. The orchestrator
+has no tools and can't touch your files. Only its jobs can, in the same sandbox as
+any other job. Each turn is one request to its model, and it only takes a turn when a
+job reports back.
+
+The screen updates live, so you can always see what's happening:
+
+- **Progress:** time elapsed, and how many jobs have been created, completed, or are
+  running, queued or failed, along with test results and orchestrator turns.
+- **Orchestrator:** what it's doing right now, for how long, and its reasoning as it
+  writes it. Before each decision it explains its thinking in a few sentences for you
+  to read. Reasoning a provider keeps private, such as Claude's thinking, can't be
+  shown. Press `t` to read every turn in a scrollable view. If the model goes quiet
+  for 45 seconds, the screen says so. After 5 minutes of silence, Pearl tries the turn
+  again, up to three attempts.
+- **Jobs:** each job's model, status, running time and latest step or test result.
+  `pearl jobs view <job-id>` has a job's full transcript.
+- **Activity:** when jobs started and finished, and what each turn came to.
+
+The screen stays open after the session finishes until you press Esc. Press `x` twice
+to stop a session and its jobs.
+
+Detaching doesn't stop the session. To reopen it, run `pearl autonomous --latest` or
+`pearl autonomous --resume <session-id>`, or press Ctrl+O in the box. If a job asks
+for input, the session keeps going without it and pauses when nothing else can
+move. Detach and answer with:
 
 ```bash
 pearl respond <job-id> "answer"
 ```
 
-The coordinator resumes after that job leaves `waiting_input`.
+Some things to know:
+
+- **Jobs share one folder.** The orchestrator is told never to give two running jobs
+  the same files, but Pearl doesn't enforce that. Keep Max Subagents at 1 if the work
+  can't be split safely.
+- **Ordinary jobs still run one at a time.** Subagents don't wait for them, so one can
+  run alongside a session.
+- **Usage adds up.** Every job and orchestrator turn counts against that model's plan
+  or API billing. See it with `pearl accounts`.
+- **Limits.** A session can create up to 100 jobs and runs for up to 6 hours, based on
+  `max_job_seconds`. If the orchestrator fails, jobs that haven't started are
+  cancelled, and running ones finish.
 
 For daemon development, run the service in the foreground:
 

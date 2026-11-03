@@ -133,6 +133,9 @@ type ContextCheckpointStore interface {
 }
 
 type RunOptions struct {
+	// Provider and Model override the selected model for this run.
+	Provider                string
+	Model                   string
 	JobID                   string
 	WorkspaceRoot           string
 	MaxDuration             time.Duration
@@ -175,13 +178,8 @@ func Run(ctx context.Context, prompt string, options RunOptions) (string, error)
 	if err != nil {
 		return "", err
 	}
+	settings = settings.WithModel(options.Provider, options.Model)
 	apiKey := ""
-	if provider := AgentProvider(settings); options.OnlyTools && (provider == ProviderClaude || provider == ProviderAntigravity) {
-		settings.Provider, err = coordinatorProvider(ctx, settings)
-		if err != nil {
-			return "", err
-		}
-	}
 	switch AgentProvider(settings) {
 	case ProviderOpenRouter:
 		apiKey, err = loadOpenRouterAPIKey()

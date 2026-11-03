@@ -157,6 +157,7 @@ func jobViewEscapeAction(sequence string) (string, bool) {
 		return jobViewMouseAction(sequence)
 	}
 	actions := map[string]string{
+		"\x1b[Z":  "previous_field",
 		"\x1b[A":  "previous",
 		"\x1bOA":  "previous",
 		"\x1b[B":  "next",

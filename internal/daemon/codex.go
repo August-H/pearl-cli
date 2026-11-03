@@ -104,6 +104,7 @@ func (r CodexRunner) Run(
 	if err != nil {
 		return "", err
 	}
+	settings = settings.WithModel(job.AssignedProvider, job.AssignedModel)
 	apiKey := ""
 	var chatGPTAccount *chatgpt.Client
 	provider := openrouter_request.AgentProvider(settings)

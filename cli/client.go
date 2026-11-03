@@ -174,13 +174,15 @@ func (c *daemonClient) archivedJobs(ctx context.Context) ([]store.Job, error) {
 
 func (c *daemonClient) createAutonomousSession(
 	ctx context.Context,
-	goal, workspace string,
+	config store.AutonomousConfig,
 ) (store.AutonomousSession, error) {
 	var session store.AutonomousSession
-	err := c.request(ctx, http.MethodPost, "/v1/autonomous", map[string]string{
-		"goal": goal, "workspace_root": workspace,
-	}, &session)
+	err := c.request(ctx, http.MethodPost, "/v1/autonomous", config, &session)
 	return session, err
+}
+
+func (c *daemonClient) stopAutonomousSession(ctx context.Context, id string) error {
+	return c.request(ctx, http.MethodPost, "/v1/autonomous/"+url.PathEscape(id)+"/cancel", nil, nil)
 }
 
 func (c *daemonClient) latestAutonomousSession(

@@ -339,6 +339,26 @@ func (s *Store) CountJobs(ctx context.Context, status string) (int, error) {
 	return count, err
 }
 
+// jobHasARunSlot says whether a queued job may start. Ordinary jobs run one at a
+// time. A session's subagents run side by side, up to its Max Subagents, and don't
+// wait for ordinary jobs. It takes the running status twice.
+const jobHasARunSlot = `(
+    (id NOT IN (SELECT job_id FROM autonomous_jobs) AND NOT EXISTS (
+        SELECT 1 FROM jobs AS running
+        WHERE running.status = ? AND running.id NOT IN (SELECT job_id FROM autonomous_jobs)
+    ))
+    OR EXISTS (
+        SELECT 1 FROM autonomous_jobs AS mine
+        JOIN autonomous_sessions AS session ON session.id = mine.session_id
+        WHERE mine.job_id = jobs.id AND (
+            SELECT COUNT(*) FROM autonomous_jobs AS sibling
+            JOIN jobs AS running ON running.id = sibling.job_id
+            WHERE sibling.session_id = mine.session_id AND running.status = ?
+        ) < session.max_subagents
+    )
+)`
+
+// ClaimNextJob starts the oldest queued job that has a slot free.
 func (s *Store) ClaimNextJob(ctx context.Context) (Job, bool, error) {
 	transaction, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -347,8 +367,8 @@ func (s *Store) ClaimNextJob(ctx context.Context) (Job, bool, error) {
 	defer transaction.Rollback()
 
 	job, err := scanJob(transaction.QueryRowContext(ctx,
-		"SELECT "+jobColumns+" FROM jobs WHERE archived_at IS NULL AND status = ? ORDER BY created_at LIMIT 1",
-		JobQueued))
+		"SELECT "+jobColumns+" FROM jobs WHERE archived_at IS NULL AND status = ? AND "+jobHasARunSlot+" ORDER BY created_at LIMIT 1",
+		JobQueued, JobRunning, JobRunning))
 	if isNotFound(err) {
 		return Job{}, false, nil
 	}

@@ -48,7 +48,7 @@ func runAccounts(args []string) int {
 	selected := currentProvider()
 	// Ask every provider at once, then show them in a fixed order as they're ready.
 	readers := []func(context.Context, string) []accountEntry{
-		chatGPTAccountEntries, claudeAccountEntries, antigravityAccountEntries, openRouterAccountEntries,
+		chatGPTAccountEntries, claudeAccountEntries, antigravityAccountEntries,
 	}
 	results := make([]chan []accountEntry, len(readers))
 	for index, read := range readers {
@@ -121,17 +121,6 @@ func antigravityAccountEntries(ctx context.Context, selected string) []accountEn
 		openrouter_request.ProviderAntigravity, harnessLabel(store.HarnessAntigravity), usage, err,
 		selected == openrouter_request.ProviderAntigravity,
 	)}
-}
-
-func openRouterAccountEntries(_ context.Context, selected string) []accountEntry {
-	if _, err := openrouter_request.LoadOpenRouterAPIKey(); err != nil {
-		return nil
-	}
-	return []accountEntry{{
-		title: billingLabel(openrouter_request.ProviderOpenRouter) + " (OpenRouter)",
-		note:  apiLimitsNote,
-		inUse: selected == openrouter_request.ProviderOpenRouter,
-	}}
 }
 
 // chatGPTAccountEntries lists Pearl's ChatGPT sign-ins. OpenAI gives their limits

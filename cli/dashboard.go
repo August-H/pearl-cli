@@ -146,9 +146,7 @@ type dashboardJobDetailsView struct {
 
 type dashboardAutonomousView struct {
 	sessionID string
-	details   store.AutonomousDetails
-	state     autonomousTUIState
-	loadErr   error
+	screen    autonomousScreen
 }
 
 type dashboardAutonomousCommand struct {
@@ -176,8 +174,9 @@ var dashboardCommandOptions = []dashboardCommandSuggestion{
 	{usage: "jobs", completion: "jobs", description: "List the job board"},
 	{usage: "jobs view <job-id>", completion: "jobs view ", description: "Show job details and transcript"},
 	{usage: "archive", completion: "archive", description: "List archived jobs"},
-	{usage: "autonomous <goal>", completion: "autonomous ", description: "Start an autonomous session"},
-	{usage: "autonomous --resume <session-id>", completion: "autonomous --resume ", description: "Resume an autonomous session"},
+	{usage: "autonomous", completion: "autonomous", description: "Start an autonomous session"},
+	{usage: "autonomous --latest", completion: "autonomous --latest", description: "Open the latest autonomous session"},
+	{usage: "autonomous --resume <session-id>", completion: "autonomous --resume ", description: "Open an autonomous session"},
 	{usage: "job <prompt>", completion: "job ", description: "Create a job in the current directory"},
 	{usage: "job <prompt> -n <name>", completion: "job ", description: "Give the job a custom ID"},
 	{usage: "job <prompt> [-n name] --directory", completion: "job ", description: "Choose the job directory"},
@@ -337,6 +336,7 @@ func dashboardLoop(
 	jobsView := dashboardJobsView{}
 	var jobDetailsView *dashboardJobDetailsView
 	var autonomousView *dashboardAutonomousView
+	var autonomousFormView *autonomousForm
 	var modelView *modelPickerState
 	dashboardWorkspace := currentWorkspace()
 	var jobsLock sync.RWMutex
@@ -408,12 +408,9 @@ func dashboardLoop(
 				cancel()
 				inputLock.Lock()
 				if autonomousView != nil && autonomousView.sessionID == autonomousID {
-					autonomousView.loadErr = loadedErr
+					autonomousView.screen.loadErr = loadedErr
 					if loadedErr == nil {
-						autonomousView.details = loaded
-						updateAutonomousActivity(
-							&autonomousView.state, loaded, time.Now(),
-						)
+						autonomousView.screen.details = loaded
 					}
 				}
 				inputLock.Unlock()
@@ -452,7 +449,8 @@ func dashboardLoop(
 		width := readWidth()
 		height := dashboardHeight(input)
 		inputLock.Lock()
-		wantMouse := modelView != nil ||
+		wantMouse := modelView != nil || autonomousFormView != nil ||
+			autonomousView != nil && autonomousView.screen.showReasoning ||
 			jobDetailsView == nil && autonomousView == nil
 		if wantMouse != mouseEnabled {
 			if wantMouse {
@@ -462,6 +460,12 @@ func dashboardLoop(
 			}
 			mouseEnabled = wantMouse
 		}
+		if autonomousFormView != nil {
+			frame := autonomousFormView.render(width, height, color)
+			inputLock.Unlock()
+			fmt.Fprint(output, "\x1b[H", listTerminalFrame(frame))
+			return
+		}
 		if modelView != nil {
 			screen := modelView.screen(width, height, color)
 			inputLock.Unlock()
@@ -469,17 +473,9 @@ func dashboardLoop(
 			return
 		}
 		if autonomousView != nil {
-			frame := renderAutonomousScreenWithHint(
-				autonomousView.details,
-				autonomousView.state.activity,
-				autonomousView.loadErr,
-				width,
-				height,
-				color,
-				"Esc back · r refresh · work continues in daemon",
-			)
+			frame := autonomousView.screen.frame("Esc back", width, height, color, time.Now())
 			inputLock.Unlock()
-			fmt.Fprint(output, "\x1b[H\x1b[2J", dashboardTerminalFrame(frame))
+			fmt.Fprint(output, "\x1b[H", listTerminalFrame(frame))
 			return
 		}
 		if jobDetailsView != nil {
@@ -662,6 +658,8 @@ func dashboardLoop(
 				inputLock.Lock()
 				if pasteErr != nil {
 					notice = pasteErr.Error()
+				} else if autonomousFormView != nil {
+					autonomousFormView.addText(pasted)
 				} else if len(commandText)+len(pasted) > dashboardDraftLimit {
 					notice = "Draft exceeds 1 MB; paste was not added."
 				} else {
@@ -695,12 +693,21 @@ func dashboardLoop(
 			listEntries := entriesSnapshot(snapshotArchived, snapshotShowAll, snapshotFolder)
 			inputLock.Lock()
 			switch {
+			case autonomousFormView != nil:
+				if !autonomousFormView.applyAction(action) {
+					inputLock.Unlock()
+					continue
+				}
 			case modelView != nil:
 				if !modelView.applyAction(action) {
 					inputLock.Unlock()
 					continue
 				}
 			case autonomousView != nil:
+				if !autonomousView.screen.applyAction(action) {
+					inputLock.Unlock()
+					continue
+				}
 			case jobDetailsView != nil:
 				dashboardApplyJobDetailsAction(jobDetailsView, action)
 			case jobsView.open:
@@ -740,7 +747,13 @@ func dashboardLoop(
 		// Ctrl+J sends a bare line feed, while Enter sends a carriage return.
 		if character == composerNewlineKey || character == '\n' {
 			inputLock.Lock()
-			composing := modelView == nil && autonomousView == nil && jobDetailsView == nil &&
+			if autonomousFormView != nil && autonomousFormView.picker == nil && autonomousFormView.focus == autonomousFieldGoal {
+				autonomousFormView.addText("\n")
+				inputLock.Unlock()
+				draw(false)
+				continue
+			}
+			composing := autonomousFormView == nil && modelView == nil && autonomousView == nil && jobDetailsView == nil &&
 				!jobsView.open && commandView.configureStep == dashboardConfigureInactive
 			if composing && len(commandText) < dashboardDraftLimit {
 				commandText += "\n"
@@ -763,6 +776,58 @@ func dashboardLoop(
 		suggestionJobs = filterJobsForWorkspace(suggestionJobs, dashboardWorkspace)
 		navigationEntries := entriesSnapshot(snapshotArchived, snapshotShowAll, snapshotFolder)
 		inputLock.Lock()
+		if autonomousFormView != nil {
+			form := autonomousFormView
+			switch form.handleKey(character) {
+			case autonomousFormCancelled:
+				autonomousFormView = nil
+				inputLock.Unlock()
+			case autonomousFormOpenLatest:
+				inputLock.Unlock()
+				requestContext, cancel := context.WithTimeout(sessionContext, 5*time.Second)
+				session, err := client.latestAutonomousSession(requestContext)
+				cancel()
+				inputLock.Lock()
+				if err != nil {
+					form.notice = dashboardText(err.Error())
+				} else {
+					autonomousFormView = nil
+					autonomousView = newDashboardAutonomousView(session.ID)
+				}
+				inputLock.Unlock()
+			case autonomousFormBrowse:
+				start := form.browseStart()
+				inputLock.Unlock()
+				// The picker is its own window, and waits for the user.
+				path, browseErr := chooseAutonomousRepository(start)
+				inputLock.Lock()
+				form.finishBrowse(path, browseErr)
+				inputLock.Unlock()
+			case autonomousFormSubmitted:
+				config, err := form.config()
+				if err != nil {
+					form.notice = err.Error()
+					inputLock.Unlock()
+					break
+				}
+				inputLock.Unlock()
+				requestContext, cancel := context.WithTimeout(sessionContext, 5*time.Second)
+				session, err := client.createAutonomousSession(requestContext, config)
+				cancel()
+				inputLock.Lock()
+				if err != nil {
+					form.notice = dashboardText(err.Error())
+				} else {
+					autonomousFormView = nil
+					autonomousView = newDashboardAutonomousView(session.ID)
+				}
+				inputLock.Unlock()
+			default:
+				inputLock.Unlock()
+			}
+			draw(true)
+			continue
+		}
 		if modelView != nil {
 			chosen, done := modelView.handleKey(character)
 			if done && chosen == "" {
@@ -792,15 +857,29 @@ func dashboardLoop(
 			continue
 		}
 		if autonomousView != nil {
-			refreshView := false
-			switch character {
-			case 3, 4, escapeKey:
+			refreshView := true
+			stopID := ""
+			switch autonomousView.screen.handleKey(character) {
+			case autonomousScreenLeave:
 				autonomousView = nil
-				refreshView = true
-			case 'r', 'R':
-				refreshView = true
+			case autonomousScreenStop:
+				stopID = autonomousView.sessionID
+			case autonomousScreenStay:
+				refreshView = false
 			}
 			inputLock.Unlock()
+			if stopID != "" {
+				requestContext, cancel := context.WithTimeout(sessionContext, 5*time.Second)
+				stopErr := client.stopAutonomousSession(requestContext, stopID)
+				cancel()
+				if stopErr != nil {
+					inputLock.Lock()
+					if autonomousView != nil {
+						autonomousView.screen.loadErr = stopErr
+					}
+					inputLock.Unlock()
+				}
+			}
 			if refreshView {
 				draw(true)
 			}
@@ -1213,29 +1292,35 @@ func dashboardLoop(
 				commandText = ""
 				selectedSuggestion = 0
 				commandView = dashboardCommandView{}
+				if !autonomousCommand.latest && autonomousCommand.resumeID == "" {
+					form := newAutonomousForm(autonomousCommand.goal, dashboardWorkspace)
+					autonomousFormView = form
+					inputLock.Unlock()
+					draw(false)
+					commandWait.Add(1)
+					go func() {
+						defer commandWait.Done()
+						models, current, modelNotice, modelsErr := loadAutonomousModels(sessionContext)
+						inputLock.Lock()
+						form.setModels(models, current, modelNotice, modelsErr)
+						inputLock.Unlock()
+						if sessionContext.Err() == nil {
+							draw(false)
+						}
+					}()
+					continue
+				}
 				inputLock.Unlock()
 
 				requestContext, cancel := context.WithTimeout(sessionContext, 5*time.Second)
 				var session store.AutonomousSession
 				var autonomousErr error
-				switch {
-				case autonomousCommand.latest:
+				if autonomousCommand.latest {
 					session, autonomousErr = client.latestAutonomousSession(requestContext)
-				case autonomousCommand.resumeID != "":
+				} else {
 					var details store.AutonomousDetails
-					details, autonomousErr = client.autonomousDetails(
-						requestContext, autonomousCommand.resumeID,
-					)
+					details, autonomousErr = client.autonomousDetails(requestContext, autonomousCommand.resumeID)
 					session = details.Session
-				default:
-					workspace, workspaceErr := os.Getwd()
-					if workspaceErr != nil {
-						autonomousErr = workspaceErr
-					} else {
-						session, autonomousErr = client.createAutonomousSession(
-							requestContext, autonomousCommand.goal, workspace,
-						)
-					}
 				}
 				cancel()
 
@@ -1243,12 +1328,7 @@ func dashboardLoop(
 				if autonomousErr != nil {
 					notice = "Autonomous: " + autonomousErr.Error()
 				} else {
-					autonomousView = &dashboardAutonomousView{
-						sessionID: session.ID,
-						state: autonomousTUIState{
-							jobStatuses: make(map[string]string),
-						},
-					}
+					autonomousView = newDashboardAutonomousView(session.ID)
 				}
 				inputLock.Unlock()
 				draw(true)
@@ -2239,10 +2319,10 @@ func parseDashboardCommand(value string) ([]string, error) {
 func parseDashboardAutonomousCommand(
 	arguments []string,
 ) (dashboardAutonomousCommand, error) {
-	if len(arguments) == 0 {
+	if len(arguments) == 1 && arguments[0] == "--latest" {
 		return dashboardAutonomousCommand{latest: true}, nil
 	}
-	if arguments[0] == "--resume" {
+	if len(arguments) > 0 && arguments[0] == "--resume" {
 		if len(arguments) != 2 || strings.TrimSpace(arguments[1]) == "" {
 			return dashboardAutonomousCommand{}, errors.New(
 				"Usage: autonomous --resume <session-id>",
@@ -2250,16 +2330,17 @@ func parseDashboardAutonomousCommand(
 		}
 		return dashboardAutonomousCommand{resumeID: strings.TrimSpace(arguments[1])}, nil
 	}
-	if strings.HasPrefix(arguments[0], "-") {
+	if len(arguments) > 0 && strings.HasPrefix(arguments[0], "--") {
 		return dashboardAutonomousCommand{}, errors.New(
-			"Usage: autonomous [--resume <session-id>] [\"goal\"]",
+			"Usage: autonomous [--latest | --resume <session-id> | \"goal\"]",
 		)
 	}
-	goal := strings.TrimSpace(strings.Join(arguments, " "))
-	if goal == "" {
-		return dashboardAutonomousCommand{}, errors.New("Autonomous goal cannot be empty.")
-	}
-	return dashboardAutonomousCommand{goal: goal}, nil
+	// With no goal, the form opens empty.
+	return dashboardAutonomousCommand{goal: strings.TrimSpace(strings.Join(arguments, " "))}, nil
+}
+
+func newDashboardAutonomousView(sessionID string) *dashboardAutonomousView {
+	return &dashboardAutonomousView{sessionID: sessionID}
 }
 
 func renderDashboard(

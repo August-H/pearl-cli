@@ -36,6 +36,26 @@ func AgentModel(settings Settings) string {
 	return settings.Model
 }
 
+// WithModel returns these settings with one run's model chosen for it. An empty
+// provider leaves them alone.
+func (settings Settings) WithModel(provider, model string) Settings {
+	if provider == "" {
+		return settings
+	}
+	settings.Provider = provider
+	switch provider {
+	case ProviderChatGPT:
+		settings.ChatGPTModel = model
+	case ProviderClaude:
+		settings.ClaudeModel = model
+	case ProviderAntigravity:
+		settings.AntigravityModel = model
+	default:
+		settings.Model = model
+	}
+	return settings
+}
+
 func validProvider(provider string) bool {
 	switch provider {
 	case ProviderOpenRouter, ProviderChatGPT, ProviderClaude, ProviderAntigravity:
@@ -60,26 +80,6 @@ func ConfigureProviderModel(provider, model string) (string, error) {
 		return "", err
 	}
 	return ConfigureProvider(provider)
-}
-
-// coordinatorProvider picks the provider for autonomous mode's coordinator. It
-// runs in Pearl's own agent loop, which Claude Code and Antigravity sign-ins
-// can't drive, so with those selected it uses another connection if there is one.
-// The jobs it creates still run with the selected model.
-func coordinatorProvider(ctx context.Context, settings Settings) (string, error) {
-	if strings.TrimSpace(settings.ChatGPTModel) != "" {
-		if accounts, err := chatgpt.NewClient().Accounts(ctx); err == nil {
-			for _, account := range accounts {
-				if account.Active && account.Connected {
-					return ProviderChatGPT, nil
-				}
-			}
-		}
-	}
-	if _, err := loadOpenRouterAPIKey(); err == nil {
-		return ProviderOpenRouter, nil
-	}
-	return "", errors.New("autonomous mode plans with ChatGPT or OpenRouter, even when its jobs use Claude or Google models; run `pearl auth login chatgpt` or `pearl configure`")
 }
 
 func ConfigureProvider(provider string) (string, error) {

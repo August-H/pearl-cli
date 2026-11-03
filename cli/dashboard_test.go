@@ -306,7 +306,8 @@ func TestParseDashboardAutonomousCommand(t *testing.T) {
 		arguments []string
 		want      dashboardAutonomousCommand
 	}{
-		{name: "latest", want: dashboardAutonomousCommand{latest: true}},
+		{name: "empty form"},
+		{name: "latest", arguments: []string{"--latest"}, want: dashboardAutonomousCommand{latest: true}},
 		{
 			name: "new goal", arguments: []string{"audit", "the", "release"},
 			want: dashboardAutonomousCommand{goal: "audit the release"},
@@ -506,8 +507,8 @@ func TestDashboardCommandSuggestionsFilterNavigateAndFill(t *testing.T) {
 		t.Fatalf("autonomous top-level suggestions = %#v", autonomous)
 	}
 	resume := dashboardCommandSuggestions("autonomous --")
-	if len(resume) != 1 || resume[0].usage != "--resume <session-id>" ||
-		resume[0].completion != "autonomous --resume " {
+	if len(resume) != 2 || resume[0].completion != "autonomous --latest" ||
+		resume[1].usage != "--resume <session-id>" || resume[1].completion != "autonomous --resume " {
 		t.Fatalf("autonomous resume suggestions = %#v", resume)
 	}
 }

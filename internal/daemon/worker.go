@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -33,6 +34,8 @@ func (OpenRouterRunner) Run(
 	state openrouter_request.CheckpointStore,
 ) (string, error) {
 	options := openrouter_request.RunOptions{
+		Provider:      job.AssignedProvider,
+		Model:         job.AssignedModel,
 		JobID:         job.ID,
 		WorkspaceRoot: job.WorkspaceRoot,
 		Events:        events,
@@ -59,15 +62,20 @@ type followUpConsumer interface {
 	ConsumeFollowUp(ctx context.Context, jobID, followUpID string) error
 }
 
+// runningJob is a job the manager has started.
+type runningJob struct {
+	id     string
+	cancel context.CancelFunc
+}
+
 type Manager struct {
 	store  *store.Store
 	runner AgentRunner
 	wake   chan struct{}
 
-	mu        sync.Mutex
-	currentID string
-	cancel    context.CancelFunc
-	wait      sync.WaitGroup
+	mu      sync.Mutex
+	running []runningJob
+	wait    sync.WaitGroup
 }
 
 func NewManager(store *store.Store, runner AgentRunner) *Manager {
@@ -100,33 +108,35 @@ func (m *Manager) Wake() {
 	}
 }
 
+// Current returns the job that has been running longest, or "" if none is.
 func (m *Manager) Current() string {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	return m.currentID
+	if len(m.running) == 0 {
+		return ""
+	}
+	return m.running[0].id
 }
 
 func (m *Manager) Cancel(jobID string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if m.currentID == jobID && m.cancel != nil {
-		m.cancel()
+	for _, job := range m.running {
+		if job.id == jobID {
+			job.cancel()
+		}
 	}
 }
 
 func (m *Manager) setCurrent(jobID string, cancel context.CancelFunc) {
 	m.mu.Lock()
-	m.currentID = jobID
-	m.cancel = cancel
+	m.running = append(m.running, runningJob{jobID, cancel})
 	m.mu.Unlock()
 }
 
 func (m *Manager) clearCurrent(jobID string) {
 	m.mu.Lock()
-	if m.currentID == jobID {
-		m.currentID = ""
-		m.cancel = nil
-	}
+	m.running = slices.DeleteFunc(m.running, func(job runningJob) bool { return job.id == jobID })
 	m.mu.Unlock()
 }
 
@@ -136,22 +146,30 @@ func (m *Manager) workerLoop(ctx context.Context) {
 	for {
 		select {
 		case <-ctx.Done():
-			m.Cancel(m.Current())
 			return
 		case <-m.wake:
 		case <-retry.C:
 		}
 
+		// Claiming decides what may run side by side, so start everything it allows.
 		for ctx.Err() == nil {
 			job, found, err := m.store.ClaimNextJob(ctx)
 			if err != nil {
-				log.Printf("Pearl queue error: %v", err)
+				if ctx.Err() == nil {
+					log.Printf("Pearl queue error: %v", err)
+				}
 				break
 			}
 			if !found {
 				break
 			}
-			m.runJob(ctx, job)
+			m.wait.Add(1)
+			go func() {
+				defer m.wait.Done()
+				m.runJob(ctx, job)
+				// Its slot is free now.
+				m.Wake()
+			}()
 		}
 	}
 }
@@ -172,12 +190,17 @@ func (m *Manager) runJob(parent context.Context, job store.Job) {
 	}
 	if settings, err := openrouter_request.LoadAgentSettings(); err == nil {
 		harness := resolveJobHarness(job)
-		provider, model := harnessBilling(harness, settings)
+		provider, model := harnessBilling(harness, settings.WithModel(job.AssignedProvider, job.AssignedModel))
 		data, _ := json.Marshal(map[string]string{"provider": provider, "model": model, "harness": harness})
 		if err := events(openrouter_request.AgentEvent{Type: "run_config", Data: string(data)}); err != nil {
 			m.finishJob(job.ID, store.JobFailed, "", err.Error())
 			return
 		}
+	}
+	// Assigned models identify orchestrator-created jobs. Append this at dispatch
+	// so every harness receives it, while the saved assignment stays readable.
+	if job.AssignedProvider != "" {
+		job.Prompt += "\n\n" + autonomousSubagentInstructions
 	}
 	result, err := m.runner.Run(jobContext, job, events, m.store)
 	if err == nil {

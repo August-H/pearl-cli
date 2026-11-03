@@ -39,6 +39,7 @@ func startExternalRun(
 	if err != nil {
 		return nil, nil, err
 	}
+	settings = settings.WithModel(job.AssignedProvider, job.AssignedModel)
 	if err := openrouter_request.ValidateApprovedWorkspace(job.WorkspaceRoot, settings.Approved_workspace_roots); err != nil {
 		return nil, nil, err
 	}

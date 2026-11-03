@@ -53,11 +53,6 @@ type respondRequest struct {
 	Response string `json:"response"`
 }
 
-type autonomousRequest struct {
-	Goal          string `json:"goal"`
-	WorkspaceRoot string `json:"workspace_root"`
-}
-
 type jobActionResponse struct {
 	store.Job
 	EventSequence int64 `json:"event_sequence"`
@@ -113,7 +108,7 @@ func Run(ctx context.Context, paths pearlpaths.Paths, runner AgentRunner) error 
 	manager := NewManager(state, runner)
 	manager.Start(runtimeContext)
 	autonomous := NewAutonomousManager(
-		state, manager, OpenRouterAutonomousRunner{},
+		state, manager, OrchestratorRunner{Ask: askOrchestrator},
 	)
 	autonomous.Start(runtimeContext)
 	server := &Server{
@@ -241,20 +236,13 @@ func (s *Server) routes() http.Handler {
 func (s *Server) handleAutonomous(writer http.ResponseWriter, request *http.Request) {
 	switch request.Method {
 	case http.MethodPost:
-		var input autonomousRequest
+		var input store.AutonomousConfig
 		if err := decodeJSON(request, &input); err != nil {
 			writeError(writer, http.StatusBadRequest, err)
 			return
 		}
-		input.Goal = strings.TrimSpace(input.Goal)
-		if input.Goal == "" {
-			writeError(writer, http.StatusBadRequest, errors.New("goal cannot be empty"))
-			return
-		}
-		if len(input.Goal) > autonomousPromptLimit {
-			writeError(writer, http.StatusBadRequest, fmt.Errorf(
-				"goal exceeds %d bytes", autonomousPromptLimit,
-			))
+		if err := validateAutonomousConfig(&input); err != nil {
+			writeError(writer, http.StatusBadRequest, err)
 			return
 		}
 		workspace, err := validateWorkspace(input.WorkspaceRoot)
@@ -262,9 +250,8 @@ func (s *Server) handleAutonomous(writer http.ResponseWriter, request *http.Requ
 			writeError(writer, http.StatusBadRequest, err)
 			return
 		}
-		session, err := s.store.CreateAutonomousSession(
-			request.Context(), input.Goal, workspace,
-		)
+		input.WorkspaceRoot = workspace
+		session, err := s.store.CreateAutonomousSession(request.Context(), input)
 		if err != nil {
 			writeError(writer, http.StatusBadRequest, err)
 			return
@@ -287,21 +274,31 @@ func (s *Server) handleAutonomousSession(
 	writer http.ResponseWriter,
 	request *http.Request,
 ) {
-	if request.Method != http.MethodGet {
-		methodNotAllowed(writer)
-		return
-	}
-	id := strings.Trim(strings.TrimPrefix(request.URL.Path, "/v1/autonomous/"), "/")
-	if id == "" || strings.Contains(id, "/") {
+	parts := strings.Split(strings.Trim(strings.TrimPrefix(request.URL.Path, "/v1/autonomous/"), "/"), "/")
+	id := parts[0]
+	switch {
+	case id == "" || len(parts) > 2 || len(parts) == 2 && parts[1] != "cancel":
 		http.NotFound(writer, request)
-		return
+	case len(parts) == 2:
+		if request.Method != http.MethodPost {
+			methodNotAllowed(writer)
+			return
+		}
+		if err := s.autonomous.Stop(request.Context(), id); err != nil {
+			writeError(writer, http.StatusBadRequest, err)
+			return
+		}
+		writer.WriteHeader(http.StatusNoContent)
+	case request.Method != http.MethodGet:
+		methodNotAllowed(writer)
+	default:
+		details, err := s.store.AutonomousDetails(request.Context(), id)
+		if err != nil {
+			writeError(writer, http.StatusNotFound, err)
+			return
+		}
+		writeJSON(writer, http.StatusOK, details)
 	}
-	details, err := s.store.AutonomousDetails(request.Context(), id)
-	if err != nil {
-		writeError(writer, http.StatusNotFound, err)
-		return
-	}
-	writeJSON(writer, http.StatusOK, details)
 }
 
 func (s *Server) handleArchive(writer http.ResponseWriter, request *http.Request) {

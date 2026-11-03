@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -126,20 +127,18 @@ func TestCreateNamedJobUsesNameAsID(t *testing.T) {
 func TestAutonomousSessionPersistsLinkedQueuedJobs(t *testing.T) {
 	state := openTestStore(t)
 	ctx := context.Background()
-	session, err := state.CreateAutonomousSession(
-		ctx, "prepare the release", t.TempDir(),
-	)
+	session, err := state.CreateAutonomousSession(ctx, AutonomousConfig{Goal: "prepare the release", WorkspaceRoot: t.TempDir(), MaxSubagents: 1})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if session.Status != AutonomousRunning || session.Terminal() {
 		t.Fatalf("new autonomous session = %#v", session)
 	}
-	first, err := state.CreateAutonomousJob(ctx, session.ID, "run the tests")
+	first, err := state.CreateAutonomousJob(ctx, session.ID, "run the tests", "claude", "opus")
 	if err != nil {
 		t.Fatal(err)
 	}
-	second, err := state.CreateAutonomousJob(ctx, session.ID, "review the release notes")
+	second, err := state.CreateAutonomousJob(ctx, session.ID, "review the release notes", "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -164,7 +163,7 @@ func TestAutonomousSessionPersistsLinkedQueuedJobs(t *testing.T) {
 		finished.FinishedAt == nil {
 		t.Fatalf("finished autonomous session = %#v, err=%v", finished, err)
 	}
-	if _, err := state.CreateAutonomousJob(ctx, session.ID, "too late"); err == nil ||
+	if _, err := state.CreateAutonomousJob(ctx, session.ID, "too late", "", ""); err == nil ||
 		!strings.Contains(err.Error(), "already completed") {
 		t.Fatalf("create job in completed session error = %v", err)
 	}
@@ -844,5 +843,204 @@ func TestScheduleFiresOnceAndAdvances(t *testing.T) {
 	listed, err := state.ListSchedules(ctx)
 	if err != nil || len(listed) != 1 || !listed[0].NextRunAt.After(schedule.NextRunAt) {
 		t.Fatalf("schedules = %#v err=%v", listed, err)
+	}
+}
+
+func TestAutonomousSessionKeepsTheUsersChoices(t *testing.T) {
+	state := openClaimTestStore(t)
+	ctx := context.Background()
+	config := AutonomousConfig{
+		Goal: "ship it", WorkspaceRoot: t.TempDir(),
+		Orchestrator:  AutonomousModel{Provider: "claude", ID: "opus", Name: "Opus 5.5"},
+		AllowedModels: []AutonomousModel{{Provider: "claude", ID: "haiku"}, {Provider: "chatgpt", ID: "gpt-6"}},
+		AllModels:     true,
+		MaxSubagents:  4,
+	}
+	created, err := state.CreateAutonomousSession(ctx, config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := state.SetAutonomousPlan(ctx, created.ID, "step one"); err != nil {
+		t.Fatal(err)
+	}
+	session, err := state.GetAutonomousSession(ctx, created.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if session.Orchestrator != config.Orchestrator || len(session.AllowedModels) != 2 ||
+		session.AllowedModels[1].ID != "gpt-6" || !session.AllModels || session.MaxSubagents != 4 || session.Plan != "step one" {
+		t.Fatalf("session = %+v", session)
+	}
+	job, err := state.CreateAutonomousJob(ctx, created.ID, "do it", "claude", "haiku")
+	if err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := state.GetJob(ctx, job.ID)
+	if err != nil || loaded.AssignedProvider != "claude" || loaded.AssignedModel != "haiku" {
+		t.Fatalf("job = %+v, err = %v", loaded, err)
+	}
+}
+
+func openClaimTestStore(t *testing.T) *Store {
+	t.Helper()
+	state, err := Open(filepath.Join(t.TempDir(), "pearl.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { state.Close() })
+	return state
+}
+
+func claimAll(t *testing.T, state *Store) []string {
+	t.Helper()
+	var claimed []string
+	for {
+		job, found, err := state.ClaimNextJob(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !found {
+			return claimed
+		}
+		claimed = append(claimed, job.ID)
+	}
+}
+
+func TestClaimRunsSubagentsSideBySideUpToTheirLimit(t *testing.T) {
+	state := openClaimTestStore(t)
+	ctx := context.Background()
+	session, err := state.CreateAutonomousSession(ctx, AutonomousConfig{Goal: "g", WorkspaceRoot: t.TempDir(), MaxSubagents: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var jobs []Job
+	for range 3 {
+		job, err := state.CreateAutonomousJob(ctx, session.ID, "work", "", "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		jobs = append(jobs, job)
+	}
+	claimed := claimAll(t, state)
+	if len(claimed) != 2 {
+		t.Fatalf("claimed %v, want 2 of 3", claimed)
+	}
+	if err := state.FinishJob(ctx, claimed[0], JobCompleted, "ok", ""); err != nil {
+		t.Fatal(err)
+	}
+	next := claimAll(t, state)
+	if len(next) != 1 || next[0] == claimed[0] || next[0] == claimed[1] {
+		t.Fatalf("after one of %v finished, claimed %v, want the third job", claimed, next)
+	}
+}
+
+func TestClaimKeepsOrdinaryJobsOneAtATimeBesideSubagents(t *testing.T) {
+	state := openClaimTestStore(t)
+	ctx := context.Background()
+	workspace := t.TempDir()
+	first, err := state.CreateJob(ctx, "first", workspace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := state.CreateJob(ctx, "second", workspace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	session, err := state.CreateAutonomousSession(ctx, AutonomousConfig{Goal: "g", WorkspaceRoot: workspace, MaxSubagents: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	child, err := state.CreateAutonomousJob(ctx, session.ID, "child", "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Jobs made within the same moment can claim in either order, so go by who's in.
+	claimed := claimAll(t, state)
+	if len(claimed) != 2 || !slices.Contains(claimed, child.ID) ||
+		slices.Contains(claimed, first.ID) == slices.Contains(claimed, second.ID) {
+		t.Fatalf("claimed %v, want one ordinary job and the subagent", claimed)
+	}
+	running, waiting := first.ID, second.ID
+	if !slices.Contains(claimed, running) {
+		running, waiting = waiting, running
+	}
+	if err := state.FinishJob(ctx, running, JobCompleted, "ok", ""); err != nil {
+		t.Fatal(err)
+	}
+	if next := claimAll(t, state); len(next) != 1 || next[0] != waiting {
+		t.Fatalf("claimed %v, want the other ordinary job", next)
+	}
+}
+
+func TestStoppedSessionStaysStopped(t *testing.T) {
+	state := openClaimTestStore(t)
+	ctx := context.Background()
+	session, err := state.CreateAutonomousSession(ctx, AutonomousConfig{Goal: "g", WorkspaceRoot: t.TempDir(), MaxSubagents: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := state.UpdateAutonomousSession(ctx, session.ID, AutonomousCancelled, "", ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := state.UpdateAutonomousSession(ctx, session.ID, AutonomousRunning, "", ""); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := state.GetAutonomousSession(ctx, session.ID)
+	if err != nil || loaded.Status != AutonomousCancelled {
+		t.Fatalf("status = %q, err = %v", loaded.Status, err)
+	}
+	if err := state.UpdateAutonomousSession(ctx, "missing", AutonomousRunning, "", ""); err == nil {
+		t.Fatal("updating a missing session succeeded")
+	}
+}
+
+func TestAutonomousTurnsAndJobActivity(t *testing.T) {
+	state := openClaimTestStore(t)
+	ctx := context.Background()
+	session, err := state.CreateAutonomousSession(ctx, AutonomousConfig{Goal: "g", WorkspaceRoot: t.TempDir(), MaxSubagents: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err := state.StartAutonomousTurn(ctx, session.ID, "Session started")
+	if err != nil || first != 1 {
+		t.Fatalf("turn = %d, err = %v", first, err)
+	}
+	if err := state.UpdateAutonomousTurn(ctx, session.ID, first, "thinking", 12); err != nil {
+		t.Fatal(err)
+	}
+	// A turn left open is closed when the next one starts, as after a restart.
+	second, err := state.StartAutonomousTurn(ctx, session.ID, "Picking up")
+	if err != nil || second != 2 {
+		t.Fatalf("turn = %d, err = %v", second, err)
+	}
+	if err := state.FinishAutonomousTurn(ctx, session.ID, second, "Started 1 job"); err != nil {
+		t.Fatal(err)
+	}
+	job, err := state.CreateAutonomousJob(ctx, session.ID, "work", "claude", "opus")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, event := range [][2]string{{"tool", "shell: go test"}, {"answer", "frag"}} {
+		if _, err := state.AppendEvent(ctx, job.ID, event[0], event[1]); err != nil {
+			t.Fatal(err)
+		}
+	}
+	details, err := state.AutonomousDetails(ctx, session.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(details.Turns) != 2 || details.Turns[0].Reasoning != "thinking" || details.Turns[0].DecisionBytes != 12 ||
+		details.Turns[0].FinishedAt == nil || details.Turns[0].Outcome == "" || details.Turns[1].Outcome != "Started 1 job" {
+		t.Fatalf("turns = %+v", details.Turns)
+	}
+	if details.JobActivity[job.ID] != "shell: go test" {
+		t.Fatalf("activity = %v", details.JobActivity)
+	}
+	if _, err := state.AppendEvent(ctx, job.ID, "reasoning", "Looking at the failing parser test now"); err != nil {
+		t.Fatal(err)
+	}
+	details, err = state.AutonomousDetails(ctx, session.ID)
+	if err != nil || details.JobActivity[job.ID] != "thinking: Looking at the failing parser test now" {
+		t.Fatalf("activity = %v, err = %v", details.JobActivity, err)
 	}
 }
