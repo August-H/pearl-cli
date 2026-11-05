@@ -241,7 +241,7 @@ The composer wraps long drafts and keeps pasted newlines without submitting
 them. Press Shift+Enter to insert a newline, or Ctrl+E to edit the entire draft in
 `$VISUAL`, `$EDITOR`, or `vi`. Enter submits the draft. Some terminals, including
 macOS Terminal, can't tell Shift+Enter from Enter, so Shift+Enter submits there. Use
-Ctrl+J instead, which works everywhere. Alt+Enter also adds a newline. Quote multiline prompts
+Ctrl+J or type `\` then Enter instead, which work everywhere. Alt+Enter also adds a newline. Quote multiline prompts
 as you would any argument, for example `respond <job-id> "first line` followed
 by the remaining lines and a closing quote. A command error keeps the draft.
 

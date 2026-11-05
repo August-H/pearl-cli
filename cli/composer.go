@@ -39,6 +39,15 @@ func composerNewlineHint() string {
 	return "Shift+Enter"
 }
 
+// composerContinueLine turns a trailing backslash into a new line, so typing \ then
+// Enter adds a line in terminals that can't report Shift+Enter, such as macOS Terminal.
+func composerContinueLine(text string) (string, bool) {
+	if trimmed, found := strings.CutSuffix(text, "\\"); found {
+		return trimmed + "\n", true
+	}
+	return text, false
+}
+
 func isComposerEscapePrefix(sequence string) bool {
 	// Key reports with numbers can end in many ways, so wait for the last byte.
 	if parameters, found := strings.CutPrefix(sequence, "\x1b["); found && len(sequence) <= composerSequenceLimit &&

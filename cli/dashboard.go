@@ -744,6 +744,23 @@ func dashboardLoop(
 			escapeSequence = "\x1b"
 			continue
 		}
+		if character == '\r' {
+			inputLock.Lock()
+			composing := autonomousFormView == nil && modelView == nil && autonomousView == nil && jobDetailsView == nil &&
+				!jobsView.open && commandView.configureStep == dashboardConfigureInactive
+			continued := false
+			if composing {
+				commandText, continued = composerContinueLine(commandText)
+			}
+			if continued {
+				selectedSuggestion = 0
+			}
+			inputLock.Unlock()
+			if continued {
+				draw(false)
+				continue
+			}
+		}
 		// Ctrl+J sends a bare line feed, while Enter sends a carriage return.
 		if character == composerNewlineKey || character == '\n' {
 			inputLock.Lock()
@@ -2896,16 +2913,13 @@ func renderDashboardComposer(
 			len(suggestions),
 		)
 	}
-	if leftHint == "" {
-		leftHint = "  Enter to run · " + composerNewlineHint() + " newline · Ctrl+E editor"
-	} else if configureStep == dashboardConfigureInactive && !commandRunning {
-		fmt.Fprintln(&composer, dashboardTruncate("  "+composerNewlineHint()+" newline · Ctrl+E editor · pasted newlines stay in draft", width))
-	}
 	rightHint := ""
 	if configureStep != dashboardConfigureInactive {
 		rightHint = "configure  "
 	}
-	if len([]rune(leftHint))+len([]rune(rightHint))+1 <= width {
+	if leftHint == "" && rightHint == "" {
+		// The idle composer shows no key hints.
+	} else if len([]rune(leftHint))+len([]rune(rightHint))+1 <= width {
 		fmt.Fprintln(&composer, dashboardPaint(
 			color,
 			ansiDim,

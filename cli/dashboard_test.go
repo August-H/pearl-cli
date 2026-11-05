@@ -354,19 +354,13 @@ func TestRenderDashboardShowsCommandPromptAndNotice(t *testing.T) {
 			t.Fatalf("dashboard still shows the idle hint %q:\n%s", unwanted, output)
 		}
 	}
-	t.Setenv("TERM_PROGRAM", "ghostty")
 	idle := renderDashboardWithInput(
 		nil, time.Date(2026, time.August, 19, 12, 30, 0, 0, time.UTC), 80, false, nil, "", "",
 	)
-	if !strings.Contains(idle, "Ctrl+E editor") || !strings.Contains(idle, "Shift+Enter newline") {
-		t.Fatalf("idle dashboard does not explain draft editing:\n%s", idle)
-	}
-	t.Setenv("TERM_PROGRAM", "Apple_Terminal")
-	idle = renderDashboardWithInput(
-		nil, time.Date(2026, time.August, 19, 12, 30, 0, 0, time.UTC), 80, false, nil, "", "",
-	)
-	if !strings.Contains(idle, "Ctrl+J newline") || strings.Contains(idle, "Shift+Enter") {
-		t.Fatalf("macOS Terminal can't send Shift+Enter, so don't suggest it:\n%s", idle)
+	for _, unwanted := range []string{"Enter to run", "newline", "Ctrl+E editor"} {
+		if strings.Contains(idle, unwanted) {
+			t.Fatalf("idle dashboard still shows the key hint %q:\n%s", unwanted, idle)
+		}
 	}
 }
 
@@ -404,15 +398,15 @@ func TestRenderDashboardComposerShowsModelBelowInputBox(t *testing.T) {
 		output := renderDashboardComposer(nil, "", "", 80, color, 0, false,
 			dashboardConfigureInactive, false, "anthropic/claude-opus-5.5", "", 0, 0, 0, true)
 		lines := strings.Split(strings.TrimRight(output, "\n"), "\n")
-		modelLine := lines[len(lines)-2]
-		if modelLine != "  Model: anthropic/claude-opus-5.5" || !strings.Contains(lines[len(lines)-3], "╯") {
+		modelLine := lines[len(lines)-1]
+		if modelLine != "  Model: anthropic/claude-opus-5.5" || !strings.Contains(lines[len(lines)-2], "╯") {
 			t.Fatalf("color %v: model line is not plain text below the box:\n%q", color, lines)
 		}
 	}
 	output := renderDashboardComposer(nil, "", "", 80, false, 0, false,
 		dashboardConfigureInactive, false, "openrouter/free", "codex", 0, 0, 0, true)
 	lines := strings.Split(strings.TrimRight(output, "\n"), "\n")
-	if last := lines[len(lines)-2]; last != "  Model: openrouter/free · Harness: Codex" {
+	if last := lines[len(lines)-1]; last != "  Model: openrouter/free · Harness: Codex" {
 		t.Fatalf("model and harness line = %q", last)
 	}
 }

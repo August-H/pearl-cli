@@ -307,7 +307,10 @@ func (form *autonomousForm) handleKey(key rune) autonomousFormResult {
 	case autonomousFieldGoal:
 		switch {
 		case key == '\r':
-			form.moveFocus(1)
+			var continued bool
+			if form.goal, continued = composerContinueLine(form.goal); !continued {
+				form.moveFocus(1)
+			}
 		case key == 127 || key == 8:
 			if runes := []rune(form.goal); len(runes) > 0 {
 				form.goal = string(runes[:len(runes)-1])
