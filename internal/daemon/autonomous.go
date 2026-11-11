@@ -70,8 +70,9 @@ type AutonomousOutcome struct {
 }
 
 type AutonomousTools struct {
-	CreateJob func(ctx context.Context, prompt string, model store.AutonomousModel) (store.Job, error)
-	ListJobs  func(context.Context) ([]store.Job, error)
+	CreateJob    func(ctx context.Context, prompt string, model store.AutonomousModel) (store.Job, error)
+	ListJobs     func(context.Context) ([]store.Job, error)
+	RespondToJob func(ctx context.Context, job store.Job, response string) error
 	// Reviewing and Working report what the orchestrator is doing.
 	Reviewing func(context.Context) error
 	Working   func(context.Context) error
@@ -194,6 +195,13 @@ func (manager *AutonomousManager) startSession(
 			},
 			ListJobs: func(ctx context.Context) ([]store.Job, error) {
 				return manager.store.ListAutonomousJobs(ctx, session.ID)
+			},
+			RespondToJob: func(ctx context.Context, job store.Job, response string) error {
+				_, _, err := manager.store.RespondToAutonomousJob(ctx, session.ID, job.ID, job.InputToolCallID, response)
+				if err == nil {
+					manager.jobs.Wake()
+				}
+				return err
 			},
 			Reviewing: func(ctx context.Context) error {
 				return manager.store.UpdateAutonomousSession(ctx, session.ID, store.AutonomousReviewing, "", "")

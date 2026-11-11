@@ -115,6 +115,13 @@ func claudeControlRequest(ctx context.Context, requestID, subtype string) (json.
 		"type": "control_request", "request_id": requestID, "request": map[string]string{"subtype": subtype},
 	})
 	if _, err := stdin.Write(append(request, '\n')); err != nil {
+		// A CLI that exits during startup may close stdin before we write.
+		// Wait for stderr to finish copying so its error isn't lost.
+		_ = stdin.Close()
+		_ = command.Wait()
+		if detail := strings.TrimSpace(stderr.String()); detail != "" {
+			return nil, fmt.Errorf("send Claude Code a request: %s: %w", detail, err)
+		}
 		return nil, fmt.Errorf("send Claude Code a request: %w", err)
 	}
 	reader := bufio.NewReaderSize(stdout, 256<<10)

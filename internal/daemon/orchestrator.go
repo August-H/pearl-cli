@@ -150,11 +150,17 @@ func (r *turnRecorder) saveNow() {
 	r.save(strings.Join(parts, "\n\n"), decisionBytes)
 }
 
+type orchestratorJobResponse struct {
+	JobID    string `json:"job_id"`
+	Response string `json:"response"`
+}
+
 // orchestratorDecision is what the orchestrator answers each turn.
 type orchestratorDecision struct {
-	Plan   string                   `json:"plan"`
-	Jobs   []orchestratorJobRequest `json:"jobs"`
-	Finish string                   `json:"finish"`
+	Plan      string                    `json:"plan"`
+	Jobs      []orchestratorJobRequest  `json:"jobs"`
+	Responses []orchestratorJobResponse `json:"responses"`
+	Finish    string                    `json:"finish"`
 }
 
 // parseOrchestratorDecision accepts the JSON with or without a Markdown fence or a
@@ -245,7 +251,7 @@ func (r OrchestratorRunner) Run(
 		// Corrections with work still running wait for that too, so a mistake can't
 		// turn into a loop of paid turns.
 		if !firstTurn && !reports {
-			if active == 0 && waiting > 0 {
+			if active == 0 && waiting > 0 && len(corrections) == 0 {
 				return AutonomousOutcome{Waiting: true, Summary: plan}, nil
 			}
 			if active > 0 || len(corrections) == 0 {
@@ -304,6 +310,42 @@ func (r OrchestratorRunner) Run(
 			}
 		}
 
+		answered := 0
+		responseJobs := make(map[string]bool)
+		for _, response := range decision.Responses {
+			id := strings.TrimSpace(response.JobID)
+			answer := strings.TrimSpace(response.Response)
+			var target store.Job
+			for _, job := range jobs {
+				if job.ID == id {
+					target = job
+					break
+				}
+			}
+			var responseErr error
+			switch {
+			case target.ID == "" || target.Status != store.JobWaitingInput:
+				responseErr = fmt.Errorf("job %q was not waiting for input in your report", id)
+			case responseJobs[id]:
+				responseErr = fmt.Errorf("job %q already received a response this turn", id)
+			case answer == "":
+				responseErr = errors.New("the response was empty")
+			case len(answer) > autonomousPromptLimit:
+				responseErr = fmt.Errorf("the response exceeds %d bytes", autonomousPromptLimit)
+			default:
+				responseErr = tools.RespondToJob(ctx, target, answer)
+			}
+			if responseErr != nil {
+				corrections = append(corrections, "A response was not sent: "+responseErr.Error()+".")
+				continue
+			}
+			responseJobs[id] = true
+			answered++
+			// A fast job may ask another question before the next poll. Its new
+			// waiting_input state must count as a fresh report even then.
+			reviewed[id] = store.JobQueued
+		}
+
 		created := 0
 		for _, request := range decision.Jobs {
 			assignment := strings.TrimSpace(request.Prompt)
@@ -352,7 +394,7 @@ func (r OrchestratorRunner) Run(
 				corrections = append(corrections, fmt.Sprintf("You can't finish yet: the summary exceeds %d bytes.", autonomousPromptLimit))
 			case len(jobs) == 0:
 				corrections = append(corrections, "You can't finish yet: no job has done any work.")
-			case active > 0 || created > 0:
+			case active > 0 || created > 0 || answered > 0:
 				corrections = append(corrections, "You can't finish yet: jobs are still running.")
 			case waiting > 0:
 				corrections = append(corrections, "You can't finish yet: a job is waiting for the user's answer.")
@@ -363,12 +405,12 @@ func (r OrchestratorRunner) Run(
 				return AutonomousOutcome{Finished: true, Summary: decision.Finish}, nil
 			}
 		}
-		tools.TurnFinished(turn, orchestratorTurnOutcome(parseErr, decision, created, active, waiting))
+		tools.TurnFinished(turn, orchestratorTurnOutcome(parseErr, decision, created, answered, active, waiting))
 		if active == 0 && waiting == 0 && created == 0 && !unread && len(corrections) == 0 {
 			corrections = append(corrections, "No jobs are running and you started none. Start the next jobs, or finish if the goal is met.")
 		}
 		switch {
-		case created > 0 || active > 0 && parseErr == nil:
+		case created > 0 || answered > 0 || active > 0 && parseErr == nil:
 			correctionCount = 0
 		case len(corrections) > 0:
 			correctionCount++
@@ -436,7 +478,17 @@ func orchestratorTrigger(jobs []store.Job, reviewed map[string]string, correctio
 }
 
 // orchestratorTurnOutcome sums up what a turn came to.
-func orchestratorTurnOutcome(parseErr error, decision orchestratorDecision, created, active, waiting int) string {
+func orchestratorTurnOutcome(parseErr error, decision orchestratorDecision, created, answered, active, waiting int) string {
+	if parseErr == nil && answered > 0 {
+		outcome := fmt.Sprintf("Answered %d questions", answered)
+		if answered == 1 {
+			outcome = "Answered 1 question"
+		}
+		if created > 0 {
+			outcome += "; started " + jobCountText(created)
+		}
+		return outcome
+	}
 	switch {
 	case parseErr != nil:
 		return "Pearl couldn't read its answer"
@@ -446,6 +498,8 @@ func orchestratorTurnOutcome(parseErr error, decision orchestratorDecision, crea
 		return "Tried to finish too early"
 	case len(decision.Jobs) > 0:
 		return "Its jobs were rejected"
+	case len(decision.Responses) > 0:
+		return "Its responses were rejected"
 	case active > 0:
 		return "Waiting on " + jobCountText(active)
 	case waiting > 0:
@@ -638,8 +692,8 @@ func orchestratorPrompt(
 const orchestratorInstructions = `You are Pearl's orchestrator. You run a team of subagent jobs toward the user's goal. You have no tools and never touch files yourself. Pearl calls you when the session starts and again whenever a job reports back.
 
 The user is watching. First think out loud for them in a few short sentences: what you know now, and why you're choosing this work and these models. Then write a line with only the word DECISION, and after it one JSON object:
-{"plan": "your current plan and progress notes, which you get back next time", "jobs": [{"model": "<a model from the list>", "prompt": "the job's full assignment"}], "finish": "a summary of the result, only when the goal is met"}
-Leave out "jobs" or "finish" when you have none. To keep waiting for running jobs, answer with just "plan".
+{"plan": "your current plan and progress notes, which you get back next time", "jobs": [{"model": "<a model from the list>", "prompt": "the job's full assignment"}], "responses": [{"job_id": "<a waiting job's ID>", "response": "your answer to its question"}], "finish": "a summary of the result, only when the goal is met"}
+Leave out "jobs", "responses" or "finish" when you have none. To keep waiting for running jobs or leave a question for the user, answer with just "plan".
 
 How to run the team:
 - Start work right away, and use every free slot on work that can safely run at the same time.
@@ -650,7 +704,7 @@ How to run the team:
 - Tell jobs that change code to run the relevant tests and report the results. Each job's "tests" field shows what Pearl saw happen.
 - When a job reports, read its result, error and tests. Never trust its status alone. If something failed or is missing, start a new job with the details needed to fix it. If its work reveals more to do, start jobs for that too.
 - A report's "job_requests" contains requests from that subagent, each with an "issue" and a "task". Review requests on new reports against the user's goal and existing jobs. You may accept, revise, or decline each request; explain your decision in your visible response and retain it in your plan. For accepted work, choose the model yourself from the allowed list and put a self-contained assignment in your "jobs" array. Requests never create jobs automatically or override your model choice. Do not duplicate work already assigned or reconsider a handled request just because an old report is still listed.
-- A job with "waiting_for_user" needs the user's answer. Don't replace it. Keep other work going, and Pearl pauses the session when nothing else can move.
+- A job with "waiting_for_user" has paused with a question. You may answer it through "responses" when the user's goal, your plan, or the job reports give you enough information to answer confidently. This resumes that same job; don't start a replacement. Explain your answer in your visible response and retain the relevant decision in your plan. Answering is optional. Leave questions you can't resolve for the user, including missing preferences, credentials, or approvals the user hasn't granted. Keep other work going, and Pearl pauses the session when nothing else can move.
 - Use "finish" only when no job is running or waiting and the combined work meets the goal.`
 
 // askOrchestrator runs one turn on the model the user chose, with no tools.

@@ -241,7 +241,7 @@ The composer wraps long drafts and keeps pasted newlines without submitting
 them. Press Shift+Enter to insert a newline, or Ctrl+E to edit the entire draft in
 `$VISUAL`, `$EDITOR`, or `vi`. Enter submits the draft. Some terminals, including
 macOS Terminal, can't tell Shift+Enter from Enter, so Shift+Enter submits there. Use
-Ctrl+J instead, which works everywhere. Alt+Enter also adds a newline. Quote multiline prompts
+Ctrl+J or type `\` then Enter instead, which work everywhere. Alt+Enter also adds a newline. Quote multiline prompts
 as you would any argument, for example `respond <job-id> "first line` followed
 by the remaining lines and a closing quote. A command error keeps the draft.
 
@@ -611,8 +611,10 @@ to stop a session and its jobs.
 
 Detaching doesn't stop the session. To reopen it, run `pearl autonomous --latest` or
 `pearl autonomous --resume <session-id>`, or press Ctrl+O in the box. If a job asks
-for input, the session keeps going without it and pauses when nothing else can
-move. Detach and answer with:
+for input, the orchestrator may answer when the goal, its plan, or job reports
+provide enough information. Its answer resumes the same job and is recorded in
+the job's events. Questions it can't resolve stay waiting for you, while other
+work continues. The session pauses when nothing else can move. Detach and answer with:
 
 ```bash
 pearl respond <job-id> "answer"

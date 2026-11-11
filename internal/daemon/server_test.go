@@ -424,12 +424,12 @@ func TestASecondDaemonFailsWithoutTouchingTheFirst(t *testing.T) {
 	defer stopFirst()
 	firstDone := make(chan error, 1)
 	go func() { firstDone <- Run(first, paths, HarnessRunner{}) }()
-	for deadline := time.Now().Add(5 * time.Second); !socketInUse(paths.Socket); {
-		if time.Now().After(deadline) {
-			t.Fatal("the first daemon didn't start")
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
+	// The socket opens before the database is ready. Wait for startup to finish
+	// before testing the second daemon and stopping the first one.
+	client := unixHTTPClient(paths.Socket)
+	client.Timeout = 5 * time.Second
+	defer client.CloseIdleConnections()
+	waitForDaemon(t, client)
 	second := Run(context.Background(), paths, HarnessRunner{})
 	if second == nil || !strings.Contains(second.Error(), "already running") {
 		t.Fatalf("second daemon = %v", second)

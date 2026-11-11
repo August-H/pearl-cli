@@ -845,12 +845,14 @@ func startTestDaemon(t *testing.T, runner daemon.AgentRunner) *daemonClient {
 	}()
 	t.Cleanup(func() {
 		cancel()
+		// Run allows ten seconds for HTTP shutdown, including unfinished requests.
+		// Give it time to finish that grace period before reporting a stuck daemon.
 		select {
 		case err := <-daemonResult:
 			if err != nil {
 				t.Errorf("stop daemon: %v", err)
 			}
-		case <-time.After(5 * time.Second):
+		case <-time.After(15 * time.Second):
 			t.Error("daemon did not stop")
 		}
 	})

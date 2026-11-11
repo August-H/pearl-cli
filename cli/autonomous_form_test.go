@@ -361,3 +361,15 @@ func TestAutonomousFormShowsTheEndOfALongPath(t *testing.T) {
 		t.Fatalf("the folder name was cut off:\n%s", output)
 	}
 }
+
+func TestAutonomousFormBackslashEnterAddsALineToTheGoal(t *testing.T) {
+	form := testAutonomousForm()
+	typeInto(form, "first\\\rsecond")
+	if form.goal != "first\nsecond" || form.focus != autonomousFieldGoal {
+		t.Fatalf("goal=%q focus=%d", form.goal, form.focus)
+	}
+	form.handleKey('\r')
+	if form.focus != autonomousFieldRepository {
+		t.Fatalf("plain Enter didn't move on: focus=%d", form.focus)
+	}
+}

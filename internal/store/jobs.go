@@ -619,6 +619,19 @@ finished_at = NULL WHERE id = ? AND status = ?`,
 }
 
 func (s *Store) RespondToJob(ctx context.Context, id, response string) (Job, int64, error) {
+	return s.respondToJob(ctx, id, response, "", "")
+}
+
+// RespondToAutonomousJob answers only the question the orchestrator saw in its
+// own session. A user answer or a new question makes an older decision stale.
+func (s *Store) RespondToAutonomousJob(ctx context.Context, sessionID, id, inputToolCallID, response string) (Job, int64, error) {
+	if sessionID == "" || inputToolCallID == "" {
+		return Job{}, 0, errors.New("an orchestrator response requires a session and input request ID")
+	}
+	return s.respondToJob(ctx, id, response, sessionID, inputToolCallID)
+}
+
+func (s *Store) respondToJob(ctx context.Context, id, response, sessionID, inputToolCallID string) (Job, int64, error) {
 	response = strings.TrimSpace(response)
 	if response == "" {
 		return Job{}, 0, errors.New("response cannot be empty")
@@ -642,6 +655,24 @@ func (s *Store) RespondToJob(ctx context.Context, id, response string) (Job, int
 	}
 	if err := rejectArchivedJob(job); err != nil {
 		return Job{}, 0, err
+	}
+	if sessionID != "" {
+		var sessionStatus string
+		if err := transaction.QueryRowContext(ctx, `
+SELECT session.status FROM autonomous_sessions AS session
+JOIN autonomous_jobs AS linked ON linked.session_id = session.id
+WHERE session.id = ? AND linked.job_id = ?`, sessionID, id).Scan(&sessionStatus); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return Job{}, 0, fmt.Errorf("job %q does not belong to this autonomous session", id)
+			}
+			return Job{}, 0, err
+		}
+		if autonomousStatusTerminal(sessionStatus) {
+			return Job{}, 0, fmt.Errorf("autonomous session %q is already %s", sessionID, sessionStatus)
+		}
+		if job.Status != JobWaitingInput || job.InputToolCallID != inputToolCallID {
+			return Job{}, 0, fmt.Errorf("job %q is no longer waiting for that question", id)
+		}
 	}
 	switch job.Status {
 	case JobCompleted, JobFailed, JobInterrupted, JobCancelled:
@@ -674,6 +705,11 @@ WHERE id = ? AND status = ? AND archived_at IS NULL`, JobQueued, response, id, J
 	}
 	if _, err := appendEventTx(ctx, transaction, id, "user_input", response); err != nil {
 		return Job{}, 0, err
+	}
+	if sessionID != "" {
+		if _, err := appendEventTx(ctx, transaction, id, "orchestrator_response", response); err != nil {
+			return Job{}, 0, err
+		}
 	}
 	sequence, err := appendEventTx(ctx, transaction, id, "status", JobQueued)
 	if err != nil {

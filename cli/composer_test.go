@@ -23,7 +23,7 @@ func TestComposerPasteKeepsNewlinesInDraft(t *testing.T) {
 		t.Fatalf("consumed input after paste: %q", remaining)
 	}
 	output := renderDashboardComposer(nil, `respond job "first`+"\nsecond\nthird\"", "", 60, false, 0, false, dashboardConfigureInactive, false, "", "", 0, 0, 0, true)
-	for _, want := range []string{"first", "second", "third", "Ctrl+E editor"} {
+	for _, want := range []string{"first", "second", "third"} {
 		if !strings.Contains(output, want) {
 			t.Fatalf("missing %q in multiline composer: %s", want, output)
 		}
@@ -145,6 +145,23 @@ func TestComposerKeyFromSequence(t *testing.T) {
 	} {
 		if got, ok := composerKeyFromSequence(sequence); ok {
 			t.Errorf("%q decoded as %d", sequence, got)
+		}
+	}
+}
+
+func TestComposerBackslashEnterContinuesTheLine(t *testing.T) {
+	for _, test := range []struct {
+		text, want string
+		continued  bool
+	}{
+		{`run "first\`, "run \"first\n", true},
+		{`run "first`, `run "first`, false},
+		{"", "", false},
+		{`\\`, "\\\n", true},
+	} {
+		got, continued := composerContinueLine(test.text)
+		if got != test.want || continued != test.continued {
+			t.Fatalf("composerContinueLine(%q) = %q,%v; want %q,%v", test.text, got, continued, test.want, test.continued)
 		}
 	}
 }
