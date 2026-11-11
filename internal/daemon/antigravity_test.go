@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -244,16 +245,24 @@ func TestAntigravityPermissionsAndFiles(t *testing.T) {
 	}
 
 	session := &antigravitySession{parser: &codexEventParser{job: store.Job{WorkspaceRoot: workspace}}}
+	request := func(method string, params map[string]any) (any, *acpError) {
+		t.Helper()
+		data, err := json.Marshal(params)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return session.request(method, data)
+	}
 	path := filepath.Join(workspace, "sub", "note.txt")
-	if _, failure := session.request("fs/write_text_file", []byte(`{"path":"`+path+`","content":"one\ntwo\nthree"}`)); failure != nil {
+	if _, failure := request("fs/write_text_file", map[string]any{"path": path, "content": "one\ntwo\nthree"}); failure != nil {
 		t.Fatal(failure)
 	}
-	result, failure := session.request("fs/read_text_file", []byte(`{"path":"`+path+`","line":2,"limit":1}`))
+	result, failure := request("fs/read_text_file", map[string]any{"path": path, "line": 2, "limit": 1})
 	if failure != nil || result.(map[string]string)["content"] != "two" {
 		t.Fatalf("read = %v, %v", result, failure)
 	}
 	outside := filepath.Join(other, "escape.txt")
-	if _, failure := session.request("fs/write_text_file", []byte(`{"path":"`+outside+`","content":"x"}`)); failure == nil {
+	if _, failure := request("fs/write_text_file", map[string]any{"path": outside, "content": "x"}); failure == nil {
 		t.Fatal("wrote outside the workspace")
 	}
 	if _, err := os.Stat(outside); err == nil {
@@ -262,10 +271,10 @@ func TestAntigravityPermissionsAndFiles(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(config, ".env"), []byte("secret"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, failure := session.request("fs/read_text_file", []byte(`{"path":"`+filepath.Join(config, ".env")+`"}`)); failure == nil {
+	if _, failure := request("fs/read_text_file", map[string]any{"path": filepath.Join(config, ".env")}); failure == nil {
 		t.Fatal("read Pearl's API key file")
 	}
-	if _, failure := session.request("terminal/create", []byte(`{}`)); failure == nil {
+	if _, failure := request("terminal/create", map[string]any{}); failure == nil {
 		t.Fatal("accepted an unsupported request")
 	}
 }
