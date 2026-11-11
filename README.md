@@ -611,8 +611,10 @@ to stop a session and its jobs.
 
 Detaching doesn't stop the session. To reopen it, run `pearl autonomous --latest` or
 `pearl autonomous --resume <session-id>`, or press Ctrl+O in the box. If a job asks
-for input, the session keeps going without it and pauses when nothing else can
-move. Detach and answer with:
+for input, the orchestrator may answer when the goal, its plan, or job reports
+provide enough information. Its answer resumes the same job and is recorded in
+the job's events. Questions it can't resolve stay waiting for you, while other
+work continues. The session pauses when nothing else can move. Detach and answer with:
 
 ```bash
 pearl respond <job-id> "answer"
