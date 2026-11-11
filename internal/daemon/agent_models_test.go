@@ -53,6 +53,15 @@ func TestClaudeModelsReportsFailure(t *testing.T) {
 	}
 }
 
+func TestClaudeControlRequestReportsFailureWhileWriting(t *testing.T) {
+	t.Setenv(claudePathEnvironment, writeModelScript(t, "claude", "echo 'not logged in' >&2\nexit 1\n"))
+	// Exceed the pipe buffer so the request cannot finish before the CLI exits.
+	_, err := claudeControlRequest(context.Background(), "pearl-models", strings.Repeat("x", 1<<20))
+	if err == nil || !strings.Contains(err.Error(), "not logged in") {
+		t.Fatalf("err = %v", err)
+	}
+}
+
 func TestClaudeSignedInReadsTheCLIStatus(t *testing.T) {
 	t.Setenv(claudePathEnvironment, writeModelScript(t, "claude", `echo '{"loggedIn":true}'`))
 	if !ClaudeSignedIn(context.Background()) {
