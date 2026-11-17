@@ -204,7 +204,7 @@ var dashboardCommandOptions = []dashboardCommandSuggestion{
 	{usage: "status", completion: "status", description: "Show daemon and queue status"},
 	{usage: "update", completion: "update", description: "Update Pearl to the latest release"},
 	{usage: "attach <job-id>", completion: "attach ", description: "Stream a job's output"},
-	{usage: "respond <job-id> \"<answer>\"", completion: "respond ", description: "Answer a paused job or follow up on a finished one"},
+	{usage: "respond [<job-id> [\"<answer>\"]]", completion: "respond ", description: "Answer a paused job or follow up on a finished one"},
 	{usage: "cancel <job-id>", completion: "cancel ", description: "Cancel a job"},
 	{usage: "retry <job-id>", completion: "retry ", description: "Retry a finished job"},
 	{usage: "schedule list", completion: "schedule list", description: "List recurring jobs"},
@@ -1324,6 +1324,25 @@ func dashboardLoop(
 				continue
 			}
 			if len(parsed) == 0 {
+				inputLock.Unlock()
+				draw(false)
+				continue
+			}
+			if parsed[0] == "respond" && len(parsed) < 3 {
+				loaded, loadErr := loadJobs(false)
+				if loadErr != nil {
+					notice = "Respond: " + loadErr.Error()
+				} else {
+					draft, question, respondErr := dashboardRespondDraft(parsed[1:], loaded, dashboardWorkspace)
+					if respondErr != nil {
+						notice = "Respond: " + respondErr.Error()
+					} else {
+						commandInput.set(draft)
+						notice = question
+						commandView = dashboardCommandView{}
+					}
+				}
+				selectedSuggestion = 0
 				inputLock.Unlock()
 				draw(false)
 				continue

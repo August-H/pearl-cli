@@ -41,7 +41,7 @@ func TestUsageErrorsHaveNonzeroExitAndDoNotStartDaemon(t *testing.T) {
 	f := newFixture(t)
 	for _, args := range [][]string{
 		{"unknown-command"}, {"version", "extra"}, {"--workspace"},
-		{"job"}, {"run"}, {"cancel"}, {"retry"}, {"respond", "id"}, {"attach"},
+		{"job"}, {"run"}, {"cancel"}, {"retry"}, {"attach"},
 		{"jobs", "view"}, {"archive", "extra"}, {"configure", "extra"},
 		{"folder", "create"}, {"folder", "remove"}, {"skills", "unknown"},
 		{"model", "--bogus"}, {"model", "--free", "--set", "x"},

@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"runtime"
+	"strconv"
 	"strings"
 	"time"
 
@@ -16,16 +17,18 @@ import (
 )
 
 const authUsage = `Usage:
-  pearl auth login chatgpt [--no-browser] [--new-account | --account <id>]
+  pearl auth login <number> [--no-browser]
+  pearl auth login chatgpt [--no-browser] [--new-account | --account <number-or-id>]
   pearl auth login claude
   pearl auth login antigravity
   pearl auth status
   pearl auth accounts
-  pearl auth use <id>
+  pearl auth use <number-or-id>
   pearl auth logout [claude | antigravity]
 
 Each sign-in adds its models to pearl model: GPT from ChatGPT, Claude from your
 installed Claude Code, and Gemini from your installed Antigravity server.
+Use the account numbers shown by pearl auth accounts to select or refresh a sign-in.
 
 Continue with ChatGPT to use an eligible ChatGPT plan in Pearl.
 Login uses your browser and stores credentials in Pearl's config directory.
@@ -67,19 +70,31 @@ func runAuth(args []string) int {
 	client := newChatGPTClient()
 	switch args[0] {
 	case "login":
-		if len(args) < 2 || args[1] != "chatgpt" {
+		if len(args) < 2 {
 			fmt.Fprintln(os.Stderr, authUsage)
 			return 2
 		}
 		noBrowser, newAccount, accountID := false, false, ""
+		refreshByNumber := args[1] != "chatgpt"
+		if refreshByNumber {
+			if _, err := strconv.Atoi(args[1]); err != nil {
+				fmt.Fprintln(os.Stderr, authUsage)
+				return 2
+			}
+			accountID = args[1]
+		}
 		for i := 2; i < len(args); i++ {
 			switch args[i] {
 			case "--no-browser":
 				noBrowser = true
 			case "--new-account":
+				if refreshByNumber {
+					fmt.Fprintln(os.Stderr, authUsage)
+					return 2
+				}
 				newAccount = true
 			case "--account":
-				if i+1 >= len(args) {
+				if refreshByNumber || i+1 >= len(args) {
 					fmt.Fprintln(os.Stderr, authUsage)
 					return 2
 				}
@@ -103,6 +118,12 @@ func runAuth(args []string) int {
 				if a.Active {
 					accountID = a.ClientID
 				}
+			}
+		} else if accountID != "" {
+			var err error
+			accountID, err = resolveAuthAccount(ctx, client, accountID)
+			if err != nil {
+				return printError("ChatGPT", err)
 			}
 		}
 		fmt.Println("Continue with ChatGPT. Allow Pearl to use your ChatGPT plan in the browser.")
@@ -134,7 +155,11 @@ func runAuth(args []string) int {
 		if len(args) != 2 {
 			break
 		}
-		if err := client.Select(ctx, args[1]); err != nil {
+		accountID, err := resolveAuthAccount(ctx, client, args[1])
+		if err != nil {
+			return printError("ChatGPT", err)
+		}
+		if err := client.Select(ctx, accountID); err != nil {
 			return printError("ChatGPT", err)
 		}
 		forgetModelCatalogs()
@@ -182,7 +207,7 @@ func printAuthStatus(ctx context.Context, client *chatgpt.Client, all bool) int 
 		return printError("ChatGPT", err)
 	}
 	found := false
-	for _, account := range accounts {
+	for index, account := range accounts {
 		if !all && !account.Active {
 			continue
 		}
@@ -192,11 +217,25 @@ func printAuthStatus(ctx context.Context, client *chatgpt.Client, all bool) int 
 			marker = "*"
 		}
 		status := "signed out"
+		var checkErr error
 		if account.Connected {
-			status = "connected"
+			checkErr = client.CheckAccount(ctx, account.ClientID)
+			switch {
+			case checkErr == nil:
+				status = "connected"
+			case chatgpt.SignInRequired(checkErr):
+				status = "refresh required"
+			default:
+				status = "could not check"
+			}
 		}
-		fmt.Printf("%s %s  %s  %s\n", marker, account.ClientID, account.Email, status)
-		if account.Connected && account.PlanUsage {
+		fmt.Printf("%s %d  %s  %s\n", marker, index+1, dashboardText(account.Email), status)
+		switch {
+		case !account.Connected || chatgpt.SignInRequired(checkErr):
+			fmt.Printf("  To refresh this account, run `pearl auth login %d`.\n", index+1)
+		case checkErr != nil:
+			fmt.Println("  " + dashboardText(checkErr.Error()))
+		case account.PlanUsage:
 			fmt.Println("  ChatGPT plan usage is enabled.")
 		}
 	}
@@ -212,6 +251,21 @@ func printAuthStatus(ctx context.Context, client *chatgpt.Client, all bool) int 
 	}
 	fmt.Println("Manage usage:", chatgpt.UsageURL)
 	return 0
+}
+
+func resolveAuthAccount(ctx context.Context, client *chatgpt.Client, selector string) (string, error) {
+	number, err := strconv.Atoi(selector)
+	if err != nil {
+		return selector, nil
+	}
+	accounts, err := client.Accounts(ctx)
+	if err != nil {
+		return "", err
+	}
+	if number < 1 || number > len(accounts) {
+		return "", fmt.Errorf("ChatGPT account %d not found; run `pearl auth accounts`", number)
+	}
+	return accounts[number-1].ClientID, nil
 }
 
 func connectionStatus(signedIn bool, login string) string {

@@ -11,6 +11,11 @@ var ErrSignInRequired = errors.New("ChatGPT sign-in needs refreshing")
 
 func signInRequired(message string) error { return fmt.Errorf("%w: %s", ErrSignInRequired, message) }
 
+// SignInRequired distinguishes invalid credentials from temporary check failures.
+func SignInRequired(err error) bool {
+	return errors.Is(err, ErrSignInRequired)
+}
+
 // RequestError retains useful diagnostics without retaining credentials or input.
 type RequestError struct {
 	Status    int

@@ -64,6 +64,9 @@ func TestConnectionRefreshDistinguishesRejectionFromTemporaryFailure(t *testing.
 			if err == nil || errors.Is(err, ErrSignInRequired) != test.invalid {
 				t.Fatalf("connection = %v, want invalid=%v", err, test.invalid)
 			}
+			if SignInRequired(err) != test.invalid {
+				t.Fatalf("account check classification = %v, want invalid=%v", err, test.invalid)
+			}
 		})
 	}
 }

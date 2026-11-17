@@ -167,7 +167,7 @@ func commandHelp(args []string) bool {
 		"schedule remove": "pearl schedule remove <schedule-id>",
 		"status":          "pearl status [--json]", "version": "pearl version [--json]",
 		"attach": "pearl attach <job-id>", "cancel": "pearl cancel <job-id>",
-		"retry": "pearl retry <job-id>", "respond": "pearl respond <job-id> \"answer\"",
+		"retry": "pearl retry <job-id>", "respond": "pearl respond [<job-id> [\"answer\"]]",
 	}
 	for _, action := range []string{"run", "start", "stop", "restart", "status", "install", "uninstall"} {
 		help["daemon "+action] = "pearl daemon " + action

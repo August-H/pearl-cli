@@ -112,7 +112,11 @@ func TestWaitingJobYieldsQueueAndResumesAfterRestart(t *testing.T) {
 	if d = f.view("waiting"); d.Job.Status != "waiting_input" || d.Job.Question != "Which color should I use?" {
 		t.Fatalf("pause lost on restart: %+v", d.Job)
 	}
-	requireContains(t, f.ok("respond", "waiting", "blue"), "Continued with blue.")
+	response := f.command("blue\n", "respond", "waiting")
+	if response.code != 0 {
+		t.Fatalf("interactive response failed: %+v", response)
+	}
+	requireContains(t, response.stdout, "Which color should I use?", "Answer: ", "Continued with blue.")
 	d = f.waitStatus("waiting", "completed")
 	if len(d.ToolExecutions) != 2 {
 		t.Fatalf("completed tools replayed or response not saved: %+v", d.ToolExecutions)

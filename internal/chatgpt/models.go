@@ -17,6 +17,18 @@ type Model struct {
 	ContextWindow int64  `json:"context_window"`
 }
 
+// CheckAccount validates a saved sign-in without changing the selected account
+// or using inference tokens. Expired access tokens are refreshed as needed.
+func (c *Client) CheckAccount(ctx context.Context, id string) error {
+	if id == "" {
+		return errors.New("ChatGPT account ID is required")
+	}
+	account := *c
+	account.accountID = id
+	_, err := account.Models(ctx)
+	return err
+}
+
 func (c *Client) Models(ctx context.Context) ([]Model, error) {
 	token, err := c.AccessToken(ctx)
 	if err != nil {
