@@ -234,8 +234,16 @@ colors. Job suggestions also use the current workspace. Open `jobs --all` when
 you need a job from another directory.
 
 The composer stays at the bottom of the screen. When the output above it doesn't
-fit, scroll with the mouse wheel or PgUp/PgDn, and press Home or End to jump to the
-top or bottom. A line above the composer shows how much is out of view.
+fit, scroll with PgUp/PgDn. A line above the composer shows how much is out of view.
+Left/Right moves the cursor so you can insert or delete text anywhere in the
+draft. Home/End moves to the start or end of the line. In multiline drafts,
+Up/Down moves between lines; in a single line, it chooses suggestions or recalls
+command history.
+
+Drag to select text, then use your terminal's copy shortcut, such as Cmd+C on
+macOS or Ctrl+Shift+C on Linux. Ctrl+C still cancels a command or exits Pearl.
+Press F2 to turn mouse scrolling on or off. While mouse scrolling is on, or
+inside a selectable list, hold Shift while dragging to select text.
 
 Opening `pearl` or `pearl dashboard` checks your saved ChatGPT, Claude, and Gemini
 subscription connections in the background. The dashboard opens immediately;

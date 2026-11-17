@@ -179,17 +179,38 @@ func startDaemon() int {
 	if err != nil {
 		return printError("Daemon", err)
 	}
-	for deadline := time.Now().Add(20 * time.Second); time.Now().Before(deadline); {
-		ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
-		_, err := client.status(ctx)
-		cancel()
-		if err == nil {
-			fmt.Println("Pearl daemon started")
-			return 0
-		}
-		time.Sleep(100 * time.Millisecond)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	if err := waitForDaemonStart(ctx, client); err == nil {
+		fmt.Println("Pearl daemon started")
+		return 0
 	}
 	return printError("Daemon", fmt.Errorf("did not start; inspect %s", paths.Log))
+}
+
+func waitForDaemonStart(ctx context.Context, client *daemonClient) error {
+	// Most daemons are ready within a few milliseconds. Check promptly, then
+	// back off to avoid busy polling during a slow migration or restart.
+	delay := 5 * time.Millisecond
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		requestContext, cancel := context.WithTimeout(ctx, 300*time.Millisecond)
+		_, err := client.status(requestContext)
+		cancel()
+		if err == nil {
+			return nil
+		}
+		timer := time.NewTimer(delay)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return ctx.Err()
+		case <-timer.C:
+		}
+		delay = min(delay*2, 100*time.Millisecond)
+	}
 }
 
 func printDaemonStatus() int {

@@ -7,7 +7,7 @@ LDFLAGS := -s -w \
 	-X $(MODULE)/cli.commit=$(COMMIT) \
 	-X $(MODULE)/cli.date=$(DATE)
 
-.PHONY: build install test clean
+.PHONY: build install test test-functional test-race clean
 
 build:
 	go build -trimpath -ldflags "$(LDFLAGS)" -o pearl ./cmd/pearl
@@ -17,7 +17,13 @@ install: build
 	install -m 755 pearl "$$(go env GOPATH)/bin/pearl"
 
 test:
-	go vet ./... && go test ./...
+	go vet ./... && go test ./... -count=1 -timeout 5m
+
+test-functional:
+	go test ./tests/functional -count=1 -timeout 5m
+
+test-race:
+	go vet ./... && go test -race ./... -count=1 -timeout 5m
 
 clean:
 	rm -f pearl

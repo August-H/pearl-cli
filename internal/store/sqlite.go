@@ -42,6 +42,13 @@ func (s *Store) Close() error { return s.db.Close() }
 func (s *Store) Ping(ctx context.Context) error { return s.db.PingContext(ctx) }
 
 func (s *Store) migrate(ctx context.Context) error {
+	// Commit schema changes together instead of syncing each CREATE/ALTER to
+	// disk separately. A failed upgrade leaves the previous schema intact.
+	transaction, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer transaction.Rollback()
 	const schema = `
 CREATE TABLE IF NOT EXISTS resource_limits (
  id INTEGER PRIMARY KEY CHECK(id=1),
@@ -167,13 +174,10 @@ CREATE TABLE IF NOT EXISTS folders (
     created_at TEXT NOT NULL
 );
 `
-	if _, err := s.db.ExecContext(ctx, schema); err != nil {
+	if _, err := transaction.ExecContext(ctx, schema); err != nil {
 		return err
 	}
-	for _, column := range []struct {
-		name       string
-		definition string
-	}{
+	if err := ensureColumns(ctx, transaction, "jobs", []schemaColumn{
 		{name: "name", definition: "TEXT NOT NULL DEFAULT ''"},
 		{name: "agent_context", definition: "BLOB"},
 		{name: "input_question", definition: "TEXT NOT NULL DEFAULT ''"},
@@ -188,15 +192,10 @@ CREATE TABLE IF NOT EXISTS folders (
 		{name: "verification_command", definition: "TEXT NOT NULL DEFAULT ''"},
 		{name: "assigned_provider", definition: "TEXT NOT NULL DEFAULT ''"},
 		{name: "assigned_model", definition: "TEXT NOT NULL DEFAULT ''"},
-	} {
-		if err := s.ensureColumn(ctx, "jobs", column.name, column.definition); err != nil {
-			return err
-		}
+	}); err != nil {
+		return err
 	}
-	for _, column := range []struct {
-		name       string
-		definition string
-	}{
+	if err := ensureColumns(ctx, transaction, "autonomous_sessions", []schemaColumn{
 		{name: "orchestrator_provider", definition: "TEXT NOT NULL DEFAULT ''"},
 		{name: "orchestrator_model", definition: "TEXT NOT NULL DEFAULT ''"},
 		{name: "orchestrator_name", definition: "TEXT NOT NULL DEFAULT ''"},
@@ -208,10 +207,11 @@ CREATE TABLE IF NOT EXISTS folders (
 		{name: "max_tokens", definition: "INTEGER NOT NULL DEFAULT 0"},
 		{name: "max_cost_usd", definition: "REAL NOT NULL DEFAULT 0"},
 		{name: "plan", definition: "TEXT NOT NULL DEFAULT ''"},
-	} {
-		if err := s.ensureColumn(ctx, "autonomous_sessions", column.name, column.definition); err != nil {
-			return err
-		}
+	}); err != nil {
+		return err
+	}
+	if err := transaction.Commit(); err != nil {
+		return err
 	}
 	if err := s.migrateStoredJobNames(ctx); err != nil {
 		return err
@@ -233,12 +233,17 @@ AND archived_at IS NULL`, JobFailed, JobPending)
 	return err
 }
 
-func (s *Store) ensureColumn(ctx context.Context, table, column, definition string) error {
-	rows, err := s.db.QueryContext(ctx, "PRAGMA table_info("+table+")")
+type schemaColumn struct {
+	name       string
+	definition string
+}
+
+func ensureColumns(ctx context.Context, transaction *sql.Tx, table string, columns []schemaColumn) error {
+	rows, err := transaction.QueryContext(ctx, "PRAGMA table_info("+table+")")
 	if err != nil {
 		return err
 	}
-	found := false
+	found := make(map[string]bool)
 	for rows.Next() {
 		var id, notNull, primaryKey int
 		var name, dataType string
@@ -247,20 +252,26 @@ func (s *Store) ensureColumn(ctx context.Context, table, column, definition stri
 			_ = rows.Close()
 			return err
 		}
-		if name == column {
-			found = true
-		}
+		found[name] = true
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return err
 	}
 	if err := rows.Close(); err != nil {
 		return err
 	}
-	if found {
-		return nil
+	for _, column := range columns {
+		if found[column.name] {
+			continue
+		}
+		if _, err := transaction.ExecContext(ctx, fmt.Sprintf(
+			"ALTER TABLE %s ADD COLUMN %s %s", table, column.name, column.definition,
+		)); err != nil {
+			return err
+		}
 	}
-	_, err = s.db.ExecContext(ctx, fmt.Sprintf(
-		"ALTER TABLE %s ADD COLUMN %s %s", table, column, definition,
-	))
-	return err
+	return nil
 }
 
 func nowText() string { return time.Now().UTC().Format(time.RFC3339Nano) }
