@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"unicode"
+	"unicode/utf8"
 )
 
 const dashboardDraftLimit = 1 << 20
@@ -29,6 +30,168 @@ const (
 const composerNewlineKey rune = -2
 
 const composerSequenceLimit = 32
+
+// composerBuffer keeps the insertion point at a UTF-8 boundary.
+type composerBuffer struct {
+	text   string
+	cursor int
+}
+
+func (buffer *composerBuffer) set(text string) {
+	buffer.text, buffer.cursor = text, len(text)
+}
+
+func (buffer *composerBuffer) insert(text string) bool {
+	if len(buffer.text)+len(text) > dashboardDraftLimit {
+		return false
+	}
+	buffer.text = buffer.text[:buffer.cursor] + text + buffer.text[buffer.cursor:]
+	buffer.cursor += len(text)
+	return true
+}
+
+func (buffer *composerBuffer) backspace() {
+	if buffer.cursor > 0 {
+		_, size := utf8.DecodeLastRuneInString(buffer.text[:buffer.cursor])
+		buffer.text = buffer.text[:buffer.cursor-size] + buffer.text[buffer.cursor:]
+		buffer.cursor -= size
+	}
+}
+
+func (buffer *composerBuffer) delete() {
+	if buffer.cursor < len(buffer.text) {
+		_, size := utf8.DecodeRuneInString(buffer.text[buffer.cursor:])
+		buffer.text = buffer.text[:buffer.cursor] + buffer.text[buffer.cursor+size:]
+	}
+}
+
+func (buffer *composerBuffer) move(action string, width int) bool {
+	switch action {
+	case "collapse": // Left arrow.
+		if buffer.cursor > 0 {
+			_, size := utf8.DecodeLastRuneInString(buffer.text[:buffer.cursor])
+			buffer.cursor -= size
+		}
+	case "expand": // Right arrow.
+		if buffer.cursor < len(buffer.text) {
+			_, size := utf8.DecodeRuneInString(buffer.text[buffer.cursor:])
+			buffer.cursor += size
+		}
+	case "home":
+		buffer.cursor = strings.LastIndex(buffer.text[:buffer.cursor], "\n") + 1
+	case "end":
+		if end := strings.IndexByte(buffer.text[buffer.cursor:], '\n'); end >= 0 {
+			buffer.cursor += end
+		} else {
+			buffer.cursor = len(buffer.text)
+		}
+	case "delete":
+		buffer.delete()
+	case "previous", "next":
+		// Single-line drafts keep Up/Down for history and suggestions.
+		rows, row, column := composerLayout(buffer.text, buffer.cursor, width)
+		if len(rows) < 2 {
+			return false
+		}
+		target := row - 1
+		if action == "next" {
+			target = row + 1
+		}
+		if target >= 0 && target < len(rows) {
+			buffer.cursor = rows[target].start
+			lastColumn := len(rows[target].text)
+			if target+1 < len(rows) && buffer.text[rows[target+1].start-1] != '\n' {
+				// At a soft wrap, the position after the last character is
+				// the start of the next row.
+				lastColumn--
+			}
+			for count := 0; count < min(column, lastColumn); count++ {
+				_, size := utf8.DecodeRuneInString(buffer.text[buffer.cursor:])
+				buffer.cursor += size
+			}
+		}
+	default:
+		return false
+	}
+	return true
+}
+
+type composerRow struct {
+	text  []rune
+	start int
+}
+
+// composerLayout shares wrapping between cursor navigation and rendering.
+func composerLayout(text string, cursor, width int) ([]composerRow, int, int) {
+	width = max(1, width)
+	rows := []composerRow{{}}
+	cursorRow, cursorColumn := 0, 0
+	for offset, character := range text {
+		row := &rows[len(rows)-1]
+		if character != '\n' && len(row.text) == width {
+			rows = append(rows, composerRow{start: offset})
+			row = &rows[len(rows)-1]
+		}
+		if offset == cursor {
+			cursorRow, cursorColumn = len(rows)-1, len(row.text)
+		}
+		if character == '\n' {
+			rows = append(rows, composerRow{start: offset + 1})
+		} else {
+			// Keep one display cell per input rune, as the existing composer does.
+			if unicode.IsControl(character) {
+				character = ' '
+			}
+			row.text = append(row.text, character)
+		}
+	}
+	if cursor == len(text) {
+		cursorRow, cursorColumn = len(rows)-1, len(rows[len(rows)-1].text)
+	}
+	return rows, cursorRow, cursorColumn
+}
+
+func composerRowsAtCursor(text string, cursor, width, limit int) []string {
+	rows, cursorRow, cursorColumn := composerLayout(text, cursor, width)
+	limit = max(1, limit)
+	start := max(0, len(rows)-limit)
+	if cursorRow < start {
+		start = cursorRow
+	}
+	end := min(len(rows), start+limit)
+	visible := make([]string, 0, end-start)
+	for index := start; index < end; index++ {
+		row := rows[index].text
+		value := string(row)
+		if index == cursorRow {
+			value = string(row[:cursorColumn]) + "█" + string(row[cursorColumn:])
+		}
+		visible = append(visible, value)
+	}
+	return visible
+}
+
+func dashboardEscapeAction(sequence string) (string, bool) {
+	switch sequence {
+	case "\x1b[3~", "\x1b[57349u":
+		return "delete", true
+	case "\x1bOQ", "\x1b[12~", "\x1b[57365u":
+		return "mouse_toggle", true
+	case "\x1b[57350u":
+		return "collapse", true
+	case "\x1b[57351u":
+		return "expand", true
+	case "\x1b[57352u":
+		return "previous", true
+	case "\x1b[57353u":
+		return "next", true
+	case "\x1b[57356u":
+		return "home", true
+	case "\x1b[57357u":
+		return "end", true
+	}
+	return jobViewEscapeAction(sequence)
+}
 
 // composerNewlineHint names the newline key to suggest. macOS Terminal sends a plain
 // Enter for Shift+Enter, so suggesting it there would submit the draft.
