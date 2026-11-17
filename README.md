@@ -237,6 +237,24 @@ The composer stays at the bottom of the screen. When the output above it doesn't
 fit, scroll with the mouse wheel or PgUp/PgDn, and press Home or End to jump to the
 top or bottom. A line above the composer shows how much is out of view.
 
+Opening `pearl` or `pearl dashboard` checks your saved ChatGPT, Claude, and Gemini
+subscription connections in the background. The dashboard opens immediately;
+checks send no model prompts and use no inference tokens. Expiring ChatGPT tokens
+are renewed automatically when possible. If a connection is rejected or requires
+sign-in, a warning above the command box gives the reconnect command:
+
+```bash
+pearl auth login chatgpt --account <registration-id>
+pearl auth login claude
+pearl auth login antigravity
+```
+
+Every connected ChatGPT registration is checked, including accounts you aren't
+currently using. Network failures are shown as an inability to verify the
+connection. Providers you've never connected and API keys are omitted. Successful
+authentication commands in the dashboard trigger a new check and clear resolved
+warnings. Scripted commands and JSON output don't run startup checks.
+
 The composer wraps long drafts and keeps pasted newlines without submitting
 them. Press Shift+Enter to insert a newline, or Ctrl+E to edit the entire draft in
 `$VISUAL`, `$EDITOR`, or `vi`. Enter submits the draft. Some terminals, including

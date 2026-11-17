@@ -36,20 +36,37 @@ type claudeAccount struct {
 }
 
 func claudeSignIn(ctx context.Context) claudeAccount {
+	status, _ := claudeSignInStatus(ctx)
+	return status
+}
+
+func claudeSignInStatus(ctx context.Context) (claudeAccount, error) {
 	path, err := FindClaude()
 	if err != nil {
-		return claudeAccount{}
+		return claudeAccount{}, err
 	}
 	ctx, cancel := context.WithTimeout(ctx, agentModelsTimeout)
 	defer cancel()
 	command := exec.CommandContext(ctx, path, "auth", "status")
 	command.Env = ClaudeEnvironment()
-	output, _ := command.Output()
-	var status claudeAccount
-	if json.Unmarshal(output, &status) != nil {
-		return claudeAccount{}
+	command.WaitDelay = 2 * time.Second
+	output, runErr := command.Output()
+	if ctx.Err() != nil {
+		return claudeAccount{}, ctx.Err()
 	}
-	return status
+	var response struct {
+		LoggedIn *bool  `json:"loggedIn"`
+		Email    string `json:"email"`
+	}
+	if err := json.Unmarshal(output, &response); err != nil || response.LoggedIn == nil {
+		return claudeAccount{}, errors.New("Claude Code didn't report its sign-in status")
+	}
+	status := claudeAccount{LoggedIn: *response.LoggedIn, Email: response.Email}
+	// The CLI exits nonzero when it successfully reports a signed-out account.
+	if status.LoggedIn && runErr != nil {
+		return status, runErr
+	}
+	return status, nil
 }
 
 // ClaudeModels asks the installed CLI which models this account can use. This is

@@ -113,8 +113,8 @@ func (c *Client) exchange(ctx context.Context, form url.Values) (tokenResponse, 
 		}
 		_ = json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&failure)
 		switch failure.Error {
-		case "invalid_grant", "invalid_token":
-			return token, errors.New("ChatGPT session expired or was revoked; run `pearl auth login chatgpt` again")
+		case "invalid_grant", "invalid_token", "invalid_refresh_token", "token_expired", "refresh_token_expired", "refresh_token_invalidated", "refresh_token_reused", "invalid_client":
+			return token, signInRequired("ChatGPT session expired or was revoked; run `pearl auth login chatgpt` again")
 		default:
 			return token, fmt.Errorf("ChatGPT token exchange failed (HTTP %d); try signing in again", resp.StatusCode)
 		}
@@ -295,21 +295,21 @@ func (c *Client) AccessToken(ctx context.Context) (string, error) {
 			}
 		}
 		if a == nil || a.AccessToken == "" {
-			return errors.New("ChatGPT is not connected; run `pearl auth login chatgpt`")
+			return signInRequired("ChatGPT is not connected; run `pearl auth login chatgpt`")
 		}
 		if !hasScope(a.Scopes, "chatgpt.tokens.use.direct") || !hasScope(a.Scopes, "resource.invoke") {
-			return errors.New("ChatGPT plan usage is not enabled; run `pearl auth login chatgpt`")
+			return signInRequired("ChatGPT plan usage is not enabled; run `pearl auth login chatgpt`")
 		}
 		if time.Until(a.ExpiresAt) < 30*time.Second {
 			if a.RefreshToken == "" {
-				return errors.New("ChatGPT session expired; run `pearl auth login chatgpt`")
+				return signInRequired("ChatGPT session expired; run `pearl auth login chatgpt`")
 			}
 			token, err := c.exchange(ctx, url.Values{"grant_type": {"refresh_token"}, "client_id": {a.ClientID}, "refresh_token": {a.RefreshToken}, "resource": {resource}})
 			if err != nil {
 				return err
 			}
 			if token.RefreshToken == "" {
-				return errors.New("ChatGPT refresh response omitted its replacement refresh token; sign in again")
+				return signInRequired("ChatGPT refresh response omitted its replacement refresh token; sign in again")
 			}
 			a.AccessToken = token.AccessToken
 			a.RefreshToken = token.RefreshToken
@@ -321,7 +321,7 @@ func (c *Client) AccessToken(ctx context.Context) (string, error) {
 				return err
 			}
 			if !hasScope(a.Scopes, "chatgpt.tokens.use.direct") || !hasScope(a.Scopes, "resource.invoke") {
-				return errors.New("ChatGPT plan usage permission was removed; sign in again")
+				return signInRequired("ChatGPT plan usage permission was removed; sign in again")
 			}
 		}
 		value = a.AccessToken
