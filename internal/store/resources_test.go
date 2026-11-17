@@ -29,7 +29,7 @@ func resourceSession(t *testing.T, s *Store, config AutonomousConfig) Autonomous
 func TestDefaultGlobalConcurrencyAcrossSessions(t *testing.T) {
 	s := openTestStore(t)
 	ctx := context.Background()
-	for range 3 {
+	for range 5 {
 		session := resourceSession(t, s, AutonomousConfig{MaxSubagents: 3})
 		for range 3 {
 			if _, err := s.CreateAutonomousJob(ctx, session.ID, "work", "", ""); err != nil {
@@ -57,6 +57,12 @@ func TestGlobalConcurrencyIncludesOrdinaryJobsAndReleasesSlots(t *testing.T) {
 		if _, err := s.CreateAutonomousJob(ctx, session.ID, "work", "", ""); err != nil {
 			t.Fatal(err)
 		}
+	}
+	// The first session's queued siblings cannot share its occupied workspace.
+	// A separate workspace can use the global slot when the ordinary job exits.
+	independent := resourceSession(t, s, AutonomousConfig{})
+	if _, err := s.CreateAutonomousJob(ctx, independent.ID, "independent", "", ""); err != nil {
+		t.Fatal(err)
 	}
 	var wg sync.WaitGroup
 	claims := make(chan Job, 12)

@@ -65,7 +65,8 @@ type jobDetailsResponse struct {
 	ToolExecutions []store.ToolExecution `json:"tool_executions"`
 	StatusEvents   []store.Event         `json:"status_events,omitempty"`
 	// Models lists the models the Free Tier router chose, in first-use order.
-	Models []string `json:"models,omitempty"`
+	Models     []string             `json:"models,omitempty"`
+	ChangeRuns []store.JobChangeRun `json:"change_runs,omitempty"`
 }
 
 func Run(ctx context.Context, paths pearlpaths.Paths, runner AgentRunner) error {
@@ -100,6 +101,9 @@ func Run(ctx context.Context, paths pearlpaths.Paths, runner AgentRunner) error 
 		return fmt.Errorf("open Pearl database: %w", err)
 	}
 	defer state.Close()
+	if err := recoverChanges(ctx, state); err != nil {
+		return fmt.Errorf("recover workspace changes: %w", err)
+	}
 	if _, err := state.RecoverRunningJobs(ctx); err != nil {
 		return fmt.Errorf("recover interrupted jobs: %w", err)
 	}
@@ -497,6 +501,11 @@ func (s *Server) handleJob(writer http.ResponseWriter, request *http.Request) {
 			writeError(writer, http.StatusInternalServerError, err)
 			return
 		}
+		changeRuns, err := s.store.ListChangeRuns(request.Context(), jobID)
+		if err != nil {
+			writeError(writer, http.StatusInternalServerError, err)
+			return
+		}
 		var models []string
 		seenModels := make(map[string]bool)
 		for _, event := range modelEvents {
@@ -511,6 +520,7 @@ func (s *Server) handleJob(writer http.ResponseWriter, request *http.Request) {
 			ToolExecutions: toolExecutions,
 			StatusEvents:   statusEvents,
 			Models:         models,
+			ChangeRuns:     changeRuns,
 		})
 	case "run":
 		if request.Method != http.MethodPost {

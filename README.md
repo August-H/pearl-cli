@@ -5,7 +5,7 @@ Pearl is an agent task manager. You can assign work as jobs, close the terminal,
 
 - Creates named jobs for a specific project directory.
 - Runs jobs in a durable queue, one at a time.
-- Saves transcripts, tool activity, changed files, errors, and user responses.
+- Saves transcripts, tool activity, file changes and diffs, errors, and user responses.
 - Compacts long-running model context automatically without trimming the saved transcript.
 - Pauses a job when the agent needs input without blocking the rest of the queue.
 - Provides a terminal dashboard for running, retrying, answering, reviewing, and
@@ -527,6 +527,28 @@ a section, Enter or Space to expand it, `j` and `k` or Page Up and Page Down to
 scroll, `a` to expand everything, `c` to collapse everything, and Esc to exit.
 Piped output remains plain text.
 
+New runs capture the workspace before execution and after it stops, including
+when a job fails, is cancelled, or pauses for input. **Changed files** lists
+created, modified, and deleted files. **Diffs** shows the text changes, including
+edits made through shell commands. Each retry or follow-up gets its own report,
+using the files as they were when that execution started. Pre-existing edits
+are part of the baseline. Edits made by other programs during a run can appear
+in its report.
+
+In Git repositories, capture includes tracked files and nonignored untracked
+files. Without Git, it uses Pearl's file-browser exclusions and simple
+`.gitignore` and `.pearlignore` patterns. Protected paths such as `.git` and
+`.env*`, symlinks, and junctions are excluded. Hard-linked files are listed
+without reading their contents. Binary changes are listed without text diffs.
+Capture allows 10,000 files, 1 MiB per file, and 32 MiB of contents per snapshot;
+diffs allow 64 KiB per file and 4 MiB per execution. Reports show notes for
+omitted contents, truncation, and capture failures. Reports for older jobs use
+tool records and are labeled accordingly.
+
+Starting snapshots survive daemon restarts. Pearl completes interrupted captures
+before starting new jobs and marks those reports as recovered, since edits made
+while it was stopped may be included.
+
 `pearl status` shows the daemon state, queued count, and the IDs of every job
 waiting for input across all workspaces, so a paused job in another repository
 is never hidden.
@@ -569,14 +591,14 @@ dashboard, and fill in the box:
 | **Repository** | The folder the jobs work in. It starts on the current directory. Type a path (`~` works), or press Ctrl+F to choose one in Finder, File Explorer on Windows, or zenity or kdialog on Linux. `--workspace <path>` fills this in. |
 | **Orchestrator Model** | The model that runs the session. It starts on your selected model. |
 | **Subagent Models Allowed** | Which models the orchestrator may assign. All your signed-in models by default. Open it to check only some. |
-| **Max Subagents** | How many jobs run at once, from 1 to 16. It starts at 3. |
+| **Max Subagents** | A concurrency ceiling from 1 to 16. It starts at 3. Jobs sharing the session's folder run one at a time under a workspace lock. |
 
 Use Tab or the arrow keys to move, Enter to open a list or go to the next field,
 and Ctrl+S to start from anywhere. In a list, type to search. Space checks a model
 for the subagents, and unchecking **All models** starts from an empty list.
 
-Once it starts, the orchestrator plans the work and starts jobs right away, using
-every free slot and choosing a model for each job. Each time a job reports back, the
+Once it starts, the orchestrator plans the work and queues jobs, choosing a model
+for each job. Jobs sharing its workspace run one at a time. Each time a job reports back, the
 orchestrator reads its result and what happened with its tests, then starts whatever
 that calls for: a fix for a failure, the next step, or a check of the work. It
 finishes after every job has settled and it judges the goal met.
@@ -622,11 +644,14 @@ pearl respond <job-id> "answer"
 
 Some things to know:
 
-- **Jobs share one folder.** The orchestrator is told never to give two running jobs
-  the same files, but Pearl doesn't enforce that. Keep Max Subagents at 1 if the work
-  can't be split safely.
-- **Ordinary jobs still run one at a time.** Subagents don't wait for them, so one can
-  run alongside a session.
+- **Jobs share one folder.** Pearl enforces exclusive workspace access across
+  ordinary jobs and autonomous sessions. Jobs in the same folder, nested folders,
+  or symlink aliases wait for each other. The lock lasts through final change
+  capture and is released when the run stops, including a pause for input.
+- **Ordinary jobs still run one at a time.** An ordinary job can run alongside a
+  session in a separate workspace. Jobs in a shared checkout are serialized;
+  Pearl does not create isolated worktrees automatically. Workspace locks apply
+  to jobs managed by the same Pearl daemon.
 - **Usage adds up.** Every job and orchestrator turn counts against that model's plan
   or API billing. See it with `pearl accounts`.
 - **Limits.** A session can create up to 100 jobs and runs for up to 6 hours, based on
@@ -689,6 +714,9 @@ pearl schedule remove <schedule-id>
 
 A schedule captures the working directory in which it was created. Scheduled
 jobs use the same single-agent queue as interactive jobs, so they cannot overlap.
+If an earlier run of that schedule is queued, running, or waiting for input,
+Pearl skips the firing and advances to the next interval. Missed intervals do
+not accumulate catch-up jobs. Separate schedules keep their own cadence.
 `schedule list` shows schedules for the current directory and its subfolders.
 Use `schedule list --all` to include every workspace and add a WORKSPACE column.
 

@@ -906,7 +906,7 @@ func claimAll(t *testing.T, state *Store) []string {
 	}
 }
 
-func TestClaimRunsSubagentsSideBySideUpToTheirLimit(t *testing.T) {
+func TestClaimRunsSeparateWorkspacesSideBySideUpToSessionLimit(t *testing.T) {
 	state := openClaimTestStore(t)
 	ctx := context.Background()
 	session, err := state.CreateAutonomousSession(ctx, AutonomousConfig{Goal: "g", WorkspaceRoot: t.TempDir(), MaxSubagents: 2})
@@ -920,6 +920,10 @@ func TestClaimRunsSubagentsSideBySideUpToTheirLimit(t *testing.T) {
 			t.Fatal(err)
 		}
 		jobs = append(jobs, job)
+		// Isolated checkouts still obey the per-session concurrency ceiling.
+		if _, err := state.db.ExecContext(ctx, "UPDATE jobs SET workspace_root = ? WHERE id = ?", t.TempDir(), job.ID); err != nil {
+			t.Fatal(err)
+		}
 	}
 	claimed := claimAll(t, state)
 	if len(claimed) != 2 {
@@ -934,7 +938,7 @@ func TestClaimRunsSubagentsSideBySideUpToTheirLimit(t *testing.T) {
 	}
 }
 
-func TestClaimKeepsOrdinaryJobsOneAtATimeBesideSubagents(t *testing.T) {
+func TestClaimKeepsOrdinaryJobsOneAtATimeBesideSeparateSubagentWorkspace(t *testing.T) {
 	state := openClaimTestStore(t)
 	ctx := context.Background()
 	workspace := t.TempDir()
@@ -946,7 +950,7 @@ func TestClaimKeepsOrdinaryJobsOneAtATimeBesideSubagents(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	session, err := state.CreateAutonomousSession(ctx, AutonomousConfig{Goal: "g", WorkspaceRoot: workspace, MaxSubagents: 1})
+	session, err := state.CreateAutonomousSession(ctx, AutonomousConfig{Goal: "g", WorkspaceRoot: t.TempDir(), MaxSubagents: 1})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -374,6 +374,9 @@ FROM jobs WHERE id = ?`, newID, oldID); err != nil {
 	); err != nil {
 		return fmt.Errorf("move tool results for job %q: %w", oldID, err)
 	}
+	if _, err := transaction.ExecContext(ctx, "UPDATE job_change_runs SET job_id = ? WHERE job_id = ?", newID, oldID); err != nil {
+		return fmt.Errorf("move change reports for job %q: %w", oldID, err)
+	}
 	if _, err := transaction.ExecContext(ctx, "DELETE FROM jobs WHERE id = ?", oldID); err != nil {
 		return fmt.Errorf("remove job %q: %w", oldID, err)
 	}

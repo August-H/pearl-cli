@@ -678,8 +678,8 @@ func orchestratorPrompt(
 		}
 		fmt.Fprintf(&prompt, "- %s (%s)\n", orchestratorModelKey(model), name)
 	}
-	fmt.Fprintf(&prompt, "\nThis session permits at most %d jobs at once, subject to the daemon-wide ceiling. %d are running or queued now, leaving %d session slots.\n",
-		session.MaxSubagents, running, max(0, session.MaxSubagents-running))
+	fmt.Fprintf(&prompt, "\nThe session concurrency ceiling is %d, subject to the daemon-wide ceiling. %d jobs are running or queued. Jobs sharing this folder run one at a time under a workspace lock; additional jobs wait in the queue.\n",
+		session.MaxSubagents, running)
 	fmt.Fprintf(&prompt, "This session may create %d jobs total; %d have been created.\n", sessionJobLimit(session), len(jobs))
 	if plan != "" {
 		fmt.Fprintf(&prompt, "\nYour plan and notes so far:\n%s\n", plan)
@@ -701,11 +701,11 @@ The user is watching. First think out loud for them in a few short sentences: wh
 Leave out "jobs", "responses" or "finish" when you have none. To keep waiting for running jobs or leave a question for the user, answer with just "plan".
 
 How to run the team:
-- Start work right away, and use every free slot on work that can safely run at the same time.
+- Start work right away. Jobs sharing this folder run one at a time; queue independent assignments, and wait for prerequisite reports before assigning dependent work.
 - Choose the model for each job yourself. Give the strongest models hard design and debugging, and use faster or cheaper ones for simple or mechanical work. If a model fails because of its sign-in or usage limits, use another one.
 - Within the chosen model family and class, always prioritize the newest available version on the allowed list. For example, choose GPT 6.1 Sol over GPT 5.6 Sol when both are listed. Use an older version only if the user explicitly requests it or newer versions are unavailable. The allowed list is the source of truth for model IDs; never invent an ID or choose an older version from habit.
 - Jobs can't see this conversation or each other. Each prompt has to stand on its own: the relevant goal, the files involved, what earlier jobs found, and the expected deliverable.
-- Jobs share one folder, so never give two running jobs the same files.
+- Jobs share one folder. Pearl locks overlapping workspaces and runs these jobs one at a time so they cannot overwrite each other's edits.
 - Tell jobs that change code to run the relevant tests and report the results. Each job's "tests" field shows what Pearl saw happen.
 - When a job reports, read its result, error and tests. Never trust its status alone. If something failed or is missing, start a new job with the details needed to fix it. If its work reveals more to do, start jobs for that too.
 - A report's "job_requests" contains requests from that subagent, each with an "issue" and a "task". Review requests on new reports against the user's goal and existing jobs. You may accept, revise, or decline each request; explain your decision in your visible response and retain it in your plan. For accepted work, choose the model yourself from the allowed list and put a self-contained assignment in your "jobs" array. Requests never create jobs automatically or override your model choice. Do not duplicate work already assigned or reconsider a handled request just because an old report is still listed.

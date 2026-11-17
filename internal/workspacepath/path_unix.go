@@ -25,3 +25,12 @@ func LinkCount(info os.FileInfo) uint64 {
 	}
 	return 1
 }
+
+// FileLinkCount returns the link count of the opened file, avoiding path races.
+func FileLinkCount(file *os.File) (uint64, error) {
+	info, err := file.Stat()
+	if err != nil {
+		return 0, err
+	}
+	return LinkCount(info), nil
+}

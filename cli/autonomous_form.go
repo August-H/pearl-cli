@@ -625,7 +625,7 @@ func (form *autonomousForm) renderFields(
 	case autonomousFieldOrchestrator, autonomousFieldSubagents:
 		return "Enter choose · ↑/↓ move · Ctrl+S start · Esc cancel"
 	case autonomousFieldMax:
-		return fmt.Sprintf("How many run at once, 1 to %d · ←/→ change · Enter next · Esc cancel", daemon.AutonomousMaxSubagents)
+		return fmt.Sprintf("Concurrency ceiling, 1 to %d; shared folders run one at a time · ←/→ change · Enter next", daemon.AutonomousMaxSubagents)
 	}
 	return "Enter start · ↑/↓ move · Esc cancel"
 }

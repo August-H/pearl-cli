@@ -63,9 +63,6 @@ func TestReadFileInRefusesDirectoriesAndEscapes(t *testing.T) {
 }
 
 func TestReadFileInRefusesHardLinks(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("hard link counts aren't read on Windows")
-	}
 	root, directory := openTestRoot(t)
 	original := filepath.Join(directory, "original.txt")
 	writeTestFile(t, original, "content")
