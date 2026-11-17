@@ -99,10 +99,6 @@ daemon. Press Esc to detach. The session and its jobs keep running.
 
 ### Build from source
 
-Run `make test` for the full suite or `make test-functional` for the compiled
-CLI's behavior tests. [TESTING.md](TESTING.md) explains each added test, existing
-coverage, and the contracts to preserve during refactoring.
-
 You need Go and a C toolchain (SQLite uses cgo). From the repository root:
 
 ```bash
