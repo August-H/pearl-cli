@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"sync"
@@ -66,6 +67,12 @@ func (jobDetailsRunner) Run(
 	_ openrouter_request.EventSink,
 	state openrouter_request.CheckpointStore,
 ) (string, error) {
+	if err := os.MkdirAll(filepath.Join(job.WorkspaceRoot, "docs"), 0o755); err != nil {
+		return "", err
+	}
+	if err := os.WriteFile(filepath.Join(job.WorkspaceRoot, "docs", "readme.md"), []byte("updated\n"), 0o644); err != nil {
+		return "", err
+	}
 	transcript := []byte(`[
   {"role":"user","content":"update the docs"},
   {"role":"assistant","reasoning":"I should update the requested file.","tool_calls":[{"id":"call-create","type":"function","function":{"name":"create_file","arguments":"{\"relative_path\":\"docs/readme.md\"}"}}]},
@@ -420,6 +427,10 @@ func TestJobsViewShowsTranscriptAndChangedFiles(t *testing.T) {
 		t.Fatal(err)
 	}
 	waitForTestJobStatus(t, client, job.ID, store.JobCompleted)
+	details, err := client.jobDetails(context.Background(), job.ID)
+	if err != nil || len(details.ChangeRuns) != 1 || len(details.ChangeRuns[0].Report.Changes) != 1 {
+		t.Fatalf("captured changes = %+v, err = %v", details.ChangeRuns, err)
+	}
 
 	output, exitCode := captureTestStdout(t, func() int {
 		return Run([]string{"jobs", "view", job.ID})
@@ -434,6 +445,8 @@ func TestJobsViewShowsTranscriptAndChangedFiles(t *testing.T) {
 		"Changed files",
 		"created",
 		"docs/readme.md",
+		"Diffs",
+		"+updated",
 		"Tool activity",
 		"create_file docs/readme.md  ok",
 		"write_to_file docs/readme.md  ok",

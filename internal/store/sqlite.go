@@ -72,6 +72,7 @@ CREATE TABLE IF NOT EXISTS events (
     created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS events_job_sequence ON events(job_id, sequence);
+CREATE INDEX IF NOT EXISTS events_schedule_job ON events(data, job_id) WHERE type = 'schedule';
 
 CREATE TABLE IF NOT EXISTS tool_executions (
     job_id TEXT NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
@@ -82,6 +83,16 @@ CREATE TABLE IF NOT EXISTS tool_executions (
     created_at TEXT NOT NULL,
     PRIMARY KEY(job_id, tool_call_id)
 );
+
+CREATE TABLE IF NOT EXISTS job_change_runs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    job_id TEXT NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+    baseline BLOB,
+    report BLOB NOT NULL,
+    started_at TEXT NOT NULL,
+    finished_at TEXT
+);
+CREATE INDEX IF NOT EXISTS job_change_runs_job ON job_change_runs(job_id, id);
 
 CREATE TABLE IF NOT EXISTS schedules (
     id TEXT PRIMARY KEY,

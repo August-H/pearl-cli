@@ -29,6 +29,7 @@ type jobDetails struct {
 	ToolExecutions []store.ToolExecution `json:"tool_executions"`
 	StatusEvents   []store.Event         `json:"status_events"`
 	Models         []string              `json:"models"`
+	ChangeRuns     []store.JobChangeRun  `json:"change_runs,omitempty"`
 }
 
 func newDaemonClient() (*daemonClient, error) {

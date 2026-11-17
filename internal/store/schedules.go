@@ -132,17 +132,20 @@ WHERE enabled = 1 AND next_run_at <= ? ORDER BY next_run_at`,
 }
 
 func (s *Store) FireSchedule(ctx context.Context, schedule Schedule, now time.Time) (Job, bool, error) {
+	if now.Before(schedule.NextRunAt) {
+		return Job{}, false, nil
+	}
+	if schedule.IntervalSeconds < 1 || schedule.IntervalSeconds > int64((1<<63-1)/time.Second) {
+		return Job{}, false, fmt.Errorf("invalid schedule interval")
+	}
 	transaction, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return Job{}, false, err
 	}
 	defer transaction.Rollback()
 
-	nextRun := schedule.NextRunAt
 	interval := time.Duration(schedule.IntervalSeconds) * time.Second
-	for !nextRun.After(now) {
-		nextRun = nextRun.Add(interval)
-	}
+	nextRun := now.UTC().Add(interval - now.Sub(schedule.NextRunAt)%interval)
 	result, err := transaction.ExecContext(ctx, `
 UPDATE schedules SET next_run_at = ? WHERE id = ? AND enabled = 1 AND next_run_at = ?`,
 		nextRun.Format(time.RFC3339Nano), schedule.ID,
@@ -153,6 +156,21 @@ UPDATE schedules SET next_run_at = ? WHERE id = ? AND enabled = 1 AND next_run_a
 	affected, err := result.RowsAffected()
 	if err != nil || affected != 1 {
 		return Job{}, false, err
+	}
+	// Advance the cadence even when skipping a run. The schedule event links
+	// existing jobs too, so upgrading cannot enqueue duplicates of older runs.
+	var outstanding bool
+	err = transaction.QueryRowContext(ctx, `
+SELECT EXISTS (
+    SELECT 1 FROM events JOIN jobs ON jobs.id = events.job_id
+    WHERE events.type = 'schedule' AND events.data = ?
+    AND jobs.status IN (?, ?, ?)
+)`, schedule.ID, JobQueued, JobRunning, JobWaitingInput).Scan(&outstanding)
+	if err != nil {
+		return Job{}, false, err
+	}
+	if outstanding {
+		return Job{}, false, transaction.Commit()
 	}
 
 	job := Job{

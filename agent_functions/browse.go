@@ -114,6 +114,14 @@ func walkProject(ctx context.Context, root *os.Root, start string, visit func(st
 	return err
 }
 
+// WalkProjectFiles visits project entries using the same exclusions as the
+// agent's file browser. Paths are relative to root and use slash separators.
+func WalkProjectFiles(ctx context.Context, root *os.Root, visit func(string, fs.DirEntry) error) error {
+	return walkProject(ctx, root, ".", func(name, _ string, entry fs.DirEntry) error {
+		return visit(name, entry)
+	})
+}
+
 func pageBounds(offset, limit int) (int, int) {
 	if offset < 0 {
 		offset = 0

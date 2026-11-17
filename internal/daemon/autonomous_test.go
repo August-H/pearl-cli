@@ -190,8 +190,8 @@ func TestOrchestratorAssignsModelsAndMakesNewTasksFromReports(t *testing.T) {
 		models["fix what the report found"] != "chatgpt/gpt-6" {
 		t.Errorf("assigned models = %v", models)
 	}
-	if child.peak != 2 {
-		t.Errorf("peak running = %d, want 2", child.peak)
+	if child.peak != 1 {
+		t.Errorf("peak running in a shared workspace = %d, want 1", child.peak)
 	}
 	if details.Session.Plan == "" {
 		t.Error("the plan wasn't saved")
@@ -215,7 +215,7 @@ func TestOrchestratorSeesTestResultsAndLimits(t *testing.T) {
 	}
 	for _, want := range []string{
 		`"tests": "failed"`, `"test_command": "go test ./..."`, `"new_report": true`, `"model": "claude/opus"`,
-		"claude/opus (Opus 5.5)", "chatgpt/gpt-6 (GPT-6)", "At most 3 jobs run at once", "1 are running or queued now, so 2 more",
+		"claude/opus (Opus 5.5)", "chatgpt/gpt-6 (GPT-6)", "session concurrency ceiling is 3", "1 jobs are running or queued", "workspace lock",
 		"my notes", "bad model",
 	} {
 		if !strings.Contains(prompt, want) {

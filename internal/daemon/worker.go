@@ -202,13 +202,22 @@ func (m *Manager) runJob(parent context.Context, job store.Job) {
 	if job.AssignedProvider != "" {
 		job.Prompt += "\n\n" + autonomousSubagentInstructions
 	}
+	changes, err := m.beginChanges(jobContext, job)
+	if err != nil {
+		m.finishJob(job.ID, store.JobFailed, "", "save starting files: "+err.Error())
+		return
+	}
 	result, err := m.runner.Run(jobContext, job, events, m.store)
+	captureErr := finishChanges(m.store, changes, false)
+	if captureErr != nil {
+		err = errors.Join(err, fmt.Errorf("save workspace changes: %w", captureErr))
+	}
 	if err == nil {
 		m.finishJob(job.ID, store.JobCompleted, result, "")
 		return
 	}
 	var inputRequired *openrouter_request.UserInputRequiredError
-	if errors.As(err, &inputRequired) {
+	if captureErr == nil && errors.As(err, &inputRequired) {
 		inputContext, inputCancel := context.WithTimeout(context.Background(), 5*time.Second)
 		pauseErr := m.store.PauseForInput(
 			inputContext, job.ID, inputRequired.ToolCallID, inputRequired.Question,

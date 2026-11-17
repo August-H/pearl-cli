@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"github.com/August-H/pearl-cli/internal/verification"
+	"github.com/August-H/pearl-cli/internal/workspacepath"
 	"strings"
 	"time"
 )
@@ -366,14 +367,59 @@ func (s *Store) ClaimNextJob(ctx context.Context) (Job, bool, error) {
 	}
 	defer transaction.Rollback()
 
-	job, err := scanJob(transaction.QueryRowContext(ctx,
-		"SELECT "+jobColumns+" FROM jobs WHERE archived_at IS NULL AND status = ? AND "+jobHasARunSlot+" ORDER BY created_at LIMIT 1",
-		JobQueued, JobRunning, JobRunning))
-	if isNotFound(err) {
-		return Job{}, false, nil
-	}
+	// Check every eligible candidate: a blocked workspace must not hold up jobs
+	// in other checkouts. Both the check and the claim use the same transaction.
+	rows, err := transaction.QueryContext(ctx, "SELECT workspace_root FROM jobs WHERE status = ?", JobRunning)
 	if err != nil {
 		return Job{}, false, err
+	}
+	var occupied []string
+	for rows.Next() {
+		var root string
+		if err := rows.Scan(&root); err != nil {
+			rows.Close()
+			return Job{}, false, err
+		}
+		occupied = append(occupied, workspacepath.CanonicalPath(root))
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return Job{}, false, err
+	}
+	rows.Close()
+	rows, err = transaction.QueryContext(ctx,
+		"SELECT "+jobColumns+" FROM jobs WHERE archived_at IS NULL AND status = ? AND "+jobHasARunSlot+" ORDER BY created_at, id",
+		JobQueued, JobRunning, JobRunning)
+	if err != nil {
+		return Job{}, false, err
+	}
+	var job Job
+	found := false
+	for rows.Next() {
+		candidate, err := scanJob(rows)
+		if err != nil {
+			rows.Close()
+			return Job{}, false, err
+		}
+		blocked := false
+		for _, root := range occupied {
+			if workspacepath.ContainsPath(root, candidate.WorkspaceRoot) || workspacepath.ContainsPath(candidate.WorkspaceRoot, root) {
+				blocked = true
+				break
+			}
+		}
+		if !blocked {
+			job, found = candidate, true
+			break
+		}
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return Job{}, false, err
+	}
+	rows.Close()
+	if !found {
+		return Job{}, false, nil
 	}
 
 	started := time.Now().UTC()

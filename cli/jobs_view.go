@@ -194,14 +194,7 @@ func buildJobViewSections(details jobDetails) ([]jobViewSection, error) {
 		})
 	}
 
-	changes := changedFilesForJob(details.ToolExecutions)
-	changeLines := make([]string, 0, len(changes))
-	for _, change := range changes {
-		changeLines = append(changeLines, fmt.Sprintf("%-8s %s", change.Action, jobViewText(change.Path)))
-	}
-	sections = append(sections, jobViewSection{
-		Title: "Changed files", Summary: jobViewCountSummary(len(changes), "file", "files"), Lines: changeLines,
-	})
+	sections = append(sections, jobChangeSections(details)...)
 
 	toolLines := make([]string, 0, len(details.ToolExecutions))
 	for _, execution := range details.ToolExecutions {
@@ -386,6 +379,53 @@ func changedFilesForJob(executions []store.ToolExecution) []jobFileChange {
 		changes = append(changes, jobFileChange{Path: path, Action: action})
 	}
 	return changes
+}
+
+func jobChangeSections(details jobDetails) []jobViewSection {
+	if len(details.ChangeRuns) == 0 {
+		changes := changedFilesForJob(details.ToolExecutions)
+		lines := []string{"Based on tool records; shell changes may be missing."}
+		for _, change := range changes {
+			lines = append(lines, fmt.Sprintf("%-8s %s", change.Action, jobViewText(change.Path)))
+		}
+		return []jobViewSection{{Title: "Changed files", Summary: jobViewCountSummary(len(changes), "file", "files") + " · tool records", Lines: lines}}
+	}
+	var changeLines, diffLines []string
+	paths := make(map[string]bool)
+	for i, run := range details.ChangeRuns {
+		heading := fmt.Sprintf("Run %d · %s", i+1, formatJobCreatedAt(run.StartedAt))
+		changeLines = append(changeLines, heading)
+		if run.FinishedAt == nil {
+			changeLines = append(changeLines, "Changes will be captured when this run stops.")
+			continue
+		}
+		if len(run.Report.Changes) == 0 && len(run.Report.Notes) == 0 {
+			changeLines = append(changeLines, "No file changes captured.")
+		}
+		for _, note := range run.Report.Notes {
+			changeLines = append(changeLines, jobViewText(note))
+		}
+		if len(run.Report.Changes) > 0 {
+			diffLines = append(diffLines, heading)
+		}
+		for _, change := range run.Report.Changes {
+			paths[change.Path] = true
+			label := fmt.Sprintf("%-8s %s", change.Action, jobViewText(change.Path))
+			changeLines = append(changeLines, label)
+			diffLines = append(diffLines, label)
+			if change.Diff != "" {
+				diffLines = append(diffLines, jobViewValueLines(change.Diff)...)
+			}
+			if change.Note != "" {
+				diffLines = append(diffLines, jobViewText(change.Note))
+			}
+		}
+	}
+	sections := []jobViewSection{{Title: "Changed files", Summary: jobViewCountSummary(len(paths), "file", "files"), Lines: changeLines}}
+	if len(diffLines) > 0 {
+		sections = append(sections, jobViewSection{Title: "Diffs", Summary: jobViewCountSummary(len(paths), "file", "files"), Lines: diffLines})
+	}
+	return sections
 }
 
 func toolExecutionSucceeded(value string) bool {
