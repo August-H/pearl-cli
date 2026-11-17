@@ -70,6 +70,7 @@ type dashboardCommandView struct {
 	harness       string
 	provider      string
 	workspace     string
+	subscriptions []subscriptionWarning
 }
 
 const dashboardHistoryLimit = 100
@@ -323,6 +324,7 @@ func dashboardLoop(
 	commandText := ""
 	editorOpen := false
 	notice := ""
+	var subscriptionWarnings []subscriptionWarning
 	selectedSuggestion := 0
 	var history dashboardHistory
 	checkModelCatalogsIfOld()
@@ -565,6 +567,7 @@ func dashboardLoop(
 		visibleCommandView.provider = currentBillingProvider
 		visibleCommandView.harness = currentHarness
 		visibleCommandView.workspace = dashboardWorkspace
+		visibleCommandView.subscriptions = subscriptionWarnings
 		inputLock.Unlock()
 		body, composer := renderDashboardParts(
 			boardJobs, time.Now(), width, color, visibleLoadErr, visibleCommand, visibleNotice,
@@ -599,6 +602,9 @@ func dashboardLoop(
 		draw(true)
 	}
 	draw(true)
+	subscriptions := newSubscriptionMonitor(sessionContext, checkSubscriptions)
+	defer subscriptions.close()
+	subscriptions.refresh()
 
 	ticker := time.NewTicker(refresh)
 	defer ticker.Stop()
@@ -616,6 +622,13 @@ func dashboardLoop(
 				draw(true)
 			case <-resize:
 				draw(false)
+			case update := <-subscriptions.updates:
+				if update.revision == subscriptions.revision.Load() {
+					inputLock.Lock()
+					subscriptionWarnings = update.warnings
+					inputLock.Unlock()
+					draw(false)
+				}
 			}
 		}
 	}()
@@ -1501,6 +1514,9 @@ func dashboardLoop(
 					commandView.exitCode = exitCode
 					commandCancel = nil
 					inputLock.Unlock()
+					if exitCode == 0 && subscriptionCommand(arguments) {
+						subscriptions.refresh()
+					}
 					if sessionContext.Err() == nil {
 						draw(true)
 					}
@@ -2559,7 +2575,7 @@ func renderDashboardParts(
 	}
 
 	fmt.Fprintln(&frame)
-	return frame.String(), renderDashboardComposer(
+	return frame.String(), subscriptionWarningLines(commandView.subscriptions, width, color) + renderDashboardComposer(
 		jobs, commandText, notice, width, color, selectedSuggestion, commandView.running,
 		commandView.configureStep, commandView.recalling, commandView.model, commandView.harness,
 		running, queued, waiting, loadErr == nil, commandView.provider,

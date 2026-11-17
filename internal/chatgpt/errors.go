@@ -6,6 +6,11 @@ import (
 	"strings"
 )
 
+// ErrSignInRequired distinguishes rejected credentials from temporary outages.
+var ErrSignInRequired = errors.New("ChatGPT sign-in needs refreshing")
+
+func signInRequired(message string) error { return fmt.Errorf("%w: %s", ErrSignInRequired, message) }
+
 // RequestError retains useful diagnostics without retaining credentials or input.
 type RequestError struct {
 	Status    int

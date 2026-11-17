@@ -53,6 +53,15 @@ func (c *Client) Models(ctx context.Context) ([]Model, error) {
 	return models, nil
 }
 
+// CheckConnection probes the requested registration without changing the selected
+// account. Models uses no inference tokens and refreshes expiring tokens first.
+func (c *Client) CheckConnection(ctx context.Context, accountID string) error {
+	pinned := *c
+	pinned.accountID = accountID
+	_, err := pinned.Models(ctx)
+	return err
+}
+
 // ResponseError keeps credentials and arbitrary server response bodies out of logs.
 func ResponseError(status int, code string) error {
 	switch code {
@@ -61,9 +70,9 @@ func ResponseError(status int, code string) error {
 	}
 	switch status {
 	case 401:
-		return errors.New("ChatGPT session was rejected; run `pearl auth login chatgpt`")
+		return signInRequired("ChatGPT session was rejected; run `pearl auth login chatgpt`")
 	case 403:
-		return errors.New("ChatGPT plan access was denied; check account permissions or sign in again")
+		return signInRequired("ChatGPT plan access was denied; check account permissions or sign in again")
 	case 429:
 		return errors.New("ChatGPT usage limit reached; retry later or manage usage at " + UsageURL)
 	default:

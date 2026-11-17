@@ -9,10 +9,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"net/url"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"runtime"
 	"sort"
 	"strings"
@@ -365,42 +363,15 @@ func AntigravityUsage(ctx context.Context) (Usage, error) {
 	if !AntigravitySignedIn() {
 		return Usage{}, ErrAntigravitySignIn
 	}
-	profile, err := AntigravityProfile()
-	if err != nil {
-		return Usage{}, err
-	}
-	contents, err := os.ReadFile(filepath.Join(profile, "antigravity-acp", antigravityTokenFile))
-	if err != nil {
-		return Usage{}, fmt.Errorf("read the Antigravity sign-in: %w", err)
-	}
-	var saved struct {
-		ClientID     string `json:"client_id"`
-		ClientSecret string `json:"client_secret"`
-		RefreshToken string `json:"refresh_token"`
-		ProjectID    string `json:"project_id"`
-	}
-	if err := json.Unmarshal(contents, &saved); err != nil || saved.ClientID == "" || saved.RefreshToken == "" {
-		return Usage{}, errors.New("the saved Antigravity sign-in can't be read; run `pearl auth login antigravity`")
-	}
 	ctx, cancel := context.WithTimeout(ctx, usageTimeout)
 	defer cancel()
-	request, err := http.NewRequestWithContext(ctx, http.MethodPost, antigravityTokenEndpoint, strings.NewReader(url.Values{
-		"client_id": {saved.ClientID}, "client_secret": {saved.ClientSecret},
-		"refresh_token": {saved.RefreshToken}, "grant_type": {"refresh_token"},
-	}.Encode()))
+	token, project, err := antigravityAccessToken(ctx)
 	if err != nil {
-		return Usage{}, err
+		return Usage{}, fmt.Errorf("%w; run `pearl auth login antigravity` to check your sign-in", err)
 	}
-	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	var token struct {
-		AccessToken string `json:"access_token"`
-	}
-	if err := antigravityJSON(request, &token); err != nil || token.AccessToken == "" {
-		return Usage{}, errors.New("Google didn't accept the saved Antigravity sign-in; run `pearl auth login antigravity`")
-	}
-	account := antigravityEmail(ctx, token.AccessToken)
-	summary := antigravityQuotaWindows(ctx, token.AccessToken, saved.ProjectID, "retrieveUserQuotaSummary", antigravitySummaryWindows)
-	models := antigravityQuotaWindows(ctx, token.AccessToken, saved.ProjectID, "fetchAvailableModels", antigravityModelWindows)
+	account := antigravityEmail(ctx, token)
+	summary := antigravityQuotaWindows(ctx, token, project, "retrieveUserQuotaSummary", antigravitySummaryWindows)
+	models := antigravityQuotaWindows(ctx, token, project, "fetchAvailableModels", antigravityModelWindows)
 	windows := combineAntigravityWindows(summary, models)
 	if len(windows) == 0 {
 		return Usage{Account: account}, errors.New("Antigravity didn't report any limits")
