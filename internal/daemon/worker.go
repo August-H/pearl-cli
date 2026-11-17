@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/August-H/pearl-cli/internal/resource"
 	"github.com/August-H/pearl-cli/internal/store"
 	"github.com/August-H/pearl-cli/internal/verification"
 	"github.com/August-H/pearl-cli/openrouter_request"
@@ -176,6 +177,7 @@ func (m *Manager) workerLoop(ctx context.Context) {
 
 func (m *Manager) runJob(parent context.Context, job store.Job) {
 	jobContext, cancel := context.WithCancel(parent)
+	jobContext = m.store.BudgetContext(jobContext, job.ID, "")
 	m.setCurrent(job.ID, cancel)
 	defer func() {
 		cancel()
@@ -183,6 +185,9 @@ func (m *Manager) runJob(parent context.Context, job store.Job) {
 	}()
 
 	events := func(event openrouter_request.AgentEvent) error {
+		if err := resource.Check(jobContext); err != nil {
+			return err
+		}
 		writeContext, writeCancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer writeCancel()
 		_, err := m.store.AppendEvent(writeContext, job.ID, event.Type, event.Data)
@@ -202,7 +207,14 @@ func (m *Manager) runJob(parent context.Context, job store.Job) {
 	if job.AssignedProvider != "" {
 		job.Prompt += "\n\n" + autonomousSubagentInstructions
 	}
-	result, err := m.runner.Run(jobContext, job, events, m.store)
+	var result string
+	err := resource.Check(jobContext)
+	if err == nil {
+		result, err = m.runner.Run(jobContext, job, events, m.store)
+		if err == nil {
+			err = resource.Check(jobContext)
+		}
+	}
 	if err == nil {
 		m.finishJob(job.ID, store.JobCompleted, result, "")
 		return

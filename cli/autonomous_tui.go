@@ -6,6 +6,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"math"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -128,12 +129,16 @@ func (screen *autonomousScreen) frame(leave string, width, height int, color boo
 func runAutonomous(args []string) int {
 	flags := flag.NewFlagSet("autonomous", flag.ContinueOnError)
 	flags.SetOutput(flagOutput(args))
+	maxJobs := flags.Int("max-jobs", 0, "total jobs allowed in this session; zero uses settings")
+	maxTokens := flags.Int64("max-tokens", 0, "reported token cap for this session; zero uses settings")
+	maxCost := flags.Float64("max-cost-usd", 0, "reported spending cap for this session; zero uses settings")
 	resume := flags.String("resume", "", "open an autonomous session by ID")
 	latest := flags.Bool("latest", false, "open the latest autonomous session")
 	workspacePath := flags.String("workspace", "", "workspace directory path for a new session")
 	flags.Usage = func() {
 		fmt.Fprintln(flags.Output(), `Usage: pearl autonomous ["goal"] [--workspace <path>]`)
 		fmt.Fprintln(flags.Output(), `       pearl autonomous --latest | --resume <session-id>`)
+		fmt.Fprintln(flags.Output(), "  Limits: --max-jobs N --max-tokens N --max-cost-usd USD. Zero uses settings.")
 		fmt.Fprintln(flags.Output(), "  Opens the form to start a session, with the goal filled in if you give one.")
 	}
 	if err := flags.Parse(args); err != nil {
@@ -142,10 +147,13 @@ func runAutonomous(args []string) int {
 		}
 		return 2
 	}
+	if *maxJobs < 0 || *maxTokens < 0 || *maxCost < 0 || math.IsNaN(*maxCost) || math.IsInf(*maxCost, 0) {
+		return printError("Autonomous", errors.New("limits must be finite and nonnegative"))
+	}
 	goal := strings.TrimSpace(strings.Join(flags.Args(), " "))
 	sessionID := strings.TrimSpace(*resume)
 	opening := *latest || sessionID != ""
-	if *latest && sessionID != "" || opening && (goal != "" || *workspacePath != "") {
+	if *latest && sessionID != "" || opening && (goal != "" || *workspacePath != "" || *maxJobs != 0 || *maxTokens != 0 || *maxCost != 0) {
 		flags.Usage()
 		return 2
 	}
@@ -169,7 +177,7 @@ func runAutonomous(args []string) int {
 			return printError("Autonomous", workspaceErr)
 		}
 		var result autonomousFormResult
-		sessionID, result, err = runAutonomousForm(os.Stdin, os.Stdout, client, goal, workspace)
+		sessionID, result, err = runAutonomousForm(os.Stdin, os.Stdout, client, goal, workspace, store.AutonomousConfig{MaxJobs: *maxJobs, MaxTokens: *maxTokens, MaxCostUSD: *maxCost})
 		if err != nil {
 			return printError("Autonomous", err)
 		}
@@ -202,6 +210,7 @@ func runAutonomousForm(
 	input, output *os.File,
 	client *daemonClient,
 	goal, workspace string,
+	limits store.AutonomousConfig,
 ) (string, autonomousFormResult, error) {
 	terminalState, err := term.MakeRaw(int(input.Fd()))
 	if err != nil {
@@ -320,6 +329,7 @@ func runAutonomousForm(
 				form.notice = err.Error()
 				break
 			}
+			config.MaxJobs, config.MaxTokens, config.MaxCostUSD = limits.MaxJobs, limits.MaxTokens, limits.MaxCostUSD
 			requestContext, cancelRequest := context.WithTimeout(ctx, 5*time.Second)
 			session, err := client.createAutonomousSession(requestContext, config)
 			cancelRequest()

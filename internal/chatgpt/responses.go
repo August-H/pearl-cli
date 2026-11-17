@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	budgets "github.com/August-H/pearl-cli/internal/resource"
 	"io"
 	"net/http"
 	"sort"
@@ -54,6 +55,11 @@ func PrepareRequest(payload map[string]any) error {
 }
 
 type Response struct {
+	Usage *struct {
+		InputTokens  int64 `json:"input_tokens"`
+		OutputTokens int64 `json:"output_tokens"`
+		TotalTokens  int64 `json:"total_tokens"`
+	} `json:"usage"`
 	Model  string            `json:"model"`
 	Status string            `json:"status"`
 	Output []json.RawMessage `json:"output"`
@@ -101,6 +107,9 @@ func (c *Client) RespondWithRecovery(ctx context.Context, client *http.Client, p
 
 func (c *Client) respondOnce(ctx context.Context, client *http.Client, payload map[string]any, delta func(string, string) error) (Response, error) {
 	var result Response
+	if err := budgets.Check(ctx); err != nil {
+		return result, err
+	}
 	if err := PrepareRequest(payload); err != nil {
 		return result, err
 	}
@@ -166,6 +175,16 @@ func (c *Client) respondOnce(ctx context.Context, client *http.Client, payload m
 		}
 		if err := json.Unmarshal([]byte(raw), &event); err != nil {
 			return false, errors.New("invalid ChatGPT response stream")
+		}
+		if event.Response.Usage != nil && (event.Type == "response.completed" || event.Type == "response.failed" || event.Type == "response.incomplete") {
+			usage := event.Response.Usage
+			tokens := usage.TotalTokens
+			if tokens == 0 {
+				tokens = usage.InputTokens + usage.OutputTokens
+			}
+			if err := budgets.Report(ctx, budgets.Usage{Tokens: tokens}); err != nil {
+				return false, err
+			}
 		}
 		switch event.Type {
 		case "response.output_item.done":

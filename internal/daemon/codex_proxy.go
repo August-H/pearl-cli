@@ -2,7 +2,9 @@ package daemon
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"github.com/August-H/pearl-cli/internal/resource"
 	"io"
 	"net"
 	"net/http"
@@ -27,6 +29,10 @@ type codexModelProxy struct {
 }
 
 func startCodexModelProxy(upstream string, report func(model string)) (*codexModelProxy, error) {
+	return startCodexModelProxyWithBudget(context.Background(), upstream, report)
+}
+
+func startCodexModelProxyWithBudget(ctx context.Context, upstream string, report func(string)) (*codexModelProxy, error) {
 	target, err := url.Parse(upstream)
 	if err != nil {
 		return nil, err
@@ -43,11 +49,19 @@ func startCodexModelProxy(upstream string, report func(model string)) (*codexMod
 		},
 		FlushInterval: -1,
 		ModifyResponse: func(response *http.Response) error {
-			response.Body = &codexModelSniffer{body: response.Body, report: report}
+			body := &resource.UsageReader{Body: response.Body, Report: func(u resource.Usage) error { return resource.Report(ctx, u) }}
+			response.Body = &codexModelSniffer{body: body, report: report}
 			return nil
 		},
 	}
-	server := &http.Server{Handler: proxy, ReadHeaderTimeout: 30 * time.Second}
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := resource.Check(ctx); err != nil {
+			http.Error(w, err.Error(), http.StatusTooManyRequests)
+			return
+		}
+		proxy.ServeHTTP(w, r)
+	})
+	server := &http.Server{Handler: handler, ReadHeaderTimeout: 30 * time.Second}
 	go func() { _ = server.Serve(listener) }()
 	return &codexModelProxy{server: server, listener: listener}, nil
 }

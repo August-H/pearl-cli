@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/August-H/pearl-cli/internal/resource"
 	"github.com/August-H/pearl-cli/internal/verification"
 	"strings"
 	"time"
@@ -350,7 +351,10 @@ const jobHasARunSlot = `(
     OR EXISTS (
         SELECT 1 FROM autonomous_jobs AS mine
         JOIN autonomous_sessions AS session ON session.id = mine.session_id
-        WHERE mine.job_id = jobs.id AND (
+        WHERE mine.job_id = jobs.id
+        AND (session.max_tokens = 0 OR session.max_tokens > (SELECT COALESCE(SUM(tokens),0) FROM resource_usage WHERE session_id=mine.session_id))
+        AND (session.max_cost_usd = 0 OR session.max_cost_usd > (SELECT COALESCE(SUM(cost_usd),0) FROM resource_usage WHERE session_id=mine.session_id))
+        AND (
             SELECT COUNT(*) FROM autonomous_jobs AS sibling
             JOIN jobs AS running ON running.id = sibling.job_id
             WHERE sibling.session_id = mine.session_id AND running.status = ?
@@ -365,6 +369,19 @@ func (s *Store) ClaimNextJob(ctx context.Context) (Job, bool, error) {
 		return Job{}, false, err
 	}
 	defer transaction.Rollback()
+	if err := checkResourceBudget(ctx, transaction, ""); err != nil {
+		if errors.Is(err, resource.ErrBudgetExceeded) {
+			return Job{}, false, nil
+		}
+		return Job{}, false, err
+	}
+	var running, limit int
+	if err := transaction.QueryRowContext(ctx, `SELECT (SELECT COUNT(*) FROM jobs WHERE status=?), max_concurrency FROM resource_limits WHERE id=1`, JobRunning).Scan(&running, &limit); err != nil {
+		return Job{}, false, err
+	}
+	if running >= limit {
+		return Job{}, false, nil
+	}
 
 	job, err := scanJob(transaction.QueryRowContext(ctx,
 		"SELECT "+jobColumns+" FROM jobs WHERE archived_at IS NULL AND status = ? AND "+jobHasARunSlot+" ORDER BY created_at LIMIT 1",

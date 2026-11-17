@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/August-H/pearl-cli/internal/resource"
 	"github.com/August-H/pearl-cli/internal/store"
 	"github.com/August-H/pearl-cli/internal/verification"
 	"github.com/August-H/pearl-cli/internal/workspacepath"
@@ -96,11 +97,18 @@ func (r ClaudeRunner) Run(
 	}}
 	writeErr := session.write(message)
 	readErr := session.read(stdout)
+	// Preserve the read error when cancellation is only process cleanup.
+	readContextErr := run.ctx.Err()
+	if readErr != nil {
+		cancel()
+	}
 	session.closeInput()
 	waitErr := command.Wait()
 	run.saveTranscript(state)
 
 	switch {
+	case readErr != nil && readContextErr == nil:
+		return "", readErr
 	case run.ctx.Err() != nil:
 		return "", fmt.Errorf("Claude Code stopped: %w", run.ctx.Err())
 	case readErr != nil:
@@ -217,16 +225,18 @@ type claudePendingTool struct {
 }
 
 type claudeEvent struct {
-	Type      string `json:"type"`
-	Subtype   string `json:"subtype"`
-	SessionID string `json:"session_id"`
-	Model     string `json:"model"`
-	RequestID string `json:"request_id"`
-	Parent    string `json:"parent_tool_use_id"`
-	Result    string `json:"result"`
-	IsError   bool   `json:"is_error"`
-	Errors    []any  `json:"errors"`
-	Request   *struct {
+	Usage        *resource.ProviderUsage `json:"usage"`
+	TotalCostUSD float64                 `json:"total_cost_usd"`
+	Type         string                  `json:"type"`
+	Subtype      string                  `json:"subtype"`
+	SessionID    string                  `json:"session_id"`
+	Model        string                  `json:"model"`
+	RequestID    string                  `json:"request_id"`
+	Parent       string                  `json:"parent_tool_use_id"`
+	Result       string                  `json:"result"`
+	IsError      bool                    `json:"is_error"`
+	Errors       []any                   `json:"errors"`
+	Request      *struct {
 		Subtype  string         `json:"subtype"`
 		ToolName string         `json:"tool_name"`
 		Input    map[string]any `json:"input"`
@@ -312,6 +322,13 @@ func (s *claudeSession) handle(event claudeEvent) error {
 		s.finished = true
 		// Nothing more will be asked, so let the process exit.
 		s.closeInput()
+		var tokens int64
+		if event.Usage != nil {
+			tokens = event.Usage.Total()
+		}
+		if err := resource.Report(s.parser.ctx, resource.Usage{Tokens: tokens, CostUSD: event.TotalCostUSD}); err != nil {
+			return err
+		}
 		if event.IsError || (event.Subtype != "" && event.Subtype != "success") {
 			detail := strings.TrimSpace(event.Result)
 			if detail == "" && len(event.Errors) > 0 {

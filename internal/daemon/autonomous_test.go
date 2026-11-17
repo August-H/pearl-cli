@@ -215,7 +215,7 @@ func TestOrchestratorSeesTestResultsAndLimits(t *testing.T) {
 	}
 	for _, want := range []string{
 		`"tests": "failed"`, `"test_command": "go test ./..."`, `"new_report": true`, `"model": "claude/opus"`,
-		"claude/opus (Opus 5.5)", "chatgpt/gpt-6 (GPT-6)", "At most 3 jobs run at once", "1 are running or queued now, so 2 more",
+		"claude/opus (Opus 5.5)", "chatgpt/gpt-6 (GPT-6)", "at most 3 jobs at once, subject to the daemon-wide ceiling", "1 are running or queued now, leaving 2 session slots", "may create 100 jobs total; 2 have been created",
 		"my notes", "bad model",
 	} {
 		if !strings.Contains(prompt, want) {
