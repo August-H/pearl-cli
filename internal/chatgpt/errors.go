@@ -6,6 +6,18 @@ import (
 	"strings"
 )
 
+type signInRequiredError struct{ message string }
+
+func (e *signInRequiredError) Error() string { return e.message }
+
+func signInRequired(message string) error { return &signInRequiredError{message} }
+
+// SignInRequired distinguishes invalid credentials from temporary check failures.
+func SignInRequired(err error) bool {
+	var required *signInRequiredError
+	return errors.As(err, &required)
+}
+
 // RequestError retains useful diagnostics without retaining credentials or input.
 type RequestError struct {
 	Status    int

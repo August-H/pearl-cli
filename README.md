@@ -128,11 +128,11 @@ only the Unix socket path.
 ```bash
 pearl auth login chatgpt                 # Continue with ChatGPT in your browser
 pearl auth login chatgpt --no-browser    # Print the URL without opening a browser
-pearl auth status                        # Show the selected account and provider
-pearl auth accounts                      # List saved registrations and their IDs
+pearl auth status                        # Check the selected account and provider
+pearl auth accounts                      # Check all saved accounts and show their numbers
 pearl auth login chatgpt --new-account   # Add another account or workspace
-pearl auth use <id>                      # Select a connected registration
-pearl auth login chatgpt --account <id>  # Reauthorize a saved registration
+pearl auth use 1                         # Select a connected account by number
+pearl auth login 1                       # Refresh a saved account by number
 pearl auth logout                        # Revoke the selected session and sign out
 pearl provider openrouter                # Switch to your saved OpenRouter model
 pearl provider chatgpt                   # Switch back to your connected account
@@ -163,6 +163,12 @@ refreshes tokens automatically, and keeps its credentials separate from Codex
 and other apps. Logout clears the selected account's tokens while retaining its
 registration for later sign-in. If revocation cannot be confirmed, Pearl reports
 that and still clears local tokens.
+
+`pearl auth accounts` and `pearl auth status` check ChatGPT sign-ins without using
+inference tokens. Invalid sign-ins show a command such as `pearl auth login 2`
+to refresh that account.
+Account numbers follow the saved account order and match across both commands.
+The original registration IDs still work with `auth use` and `auth login chatgpt --account`.
 
 ChatGPT plan limits apply to these requests. Manage the app's allowance and
 access in [ChatGPT usage settings](https://chatgpt.com/#settings/Usage).
@@ -290,8 +296,16 @@ the job in the `waiting_input` state. The question appears in the attached
 output. Respond and resume the same job with:
 
 ```bash
+pearl respond
+# Or specify the job and answer directly:
 pearl respond <job-id> "your answer"
 ```
+
+With no arguments, `pearl respond` shows the waiting question in the current
+workspace and prompts for your answer. If several jobs are waiting, choose a
+job first. You can also run `pearl respond <job-id>` to answer a specific waiting
+job interactively. In the dashboard, type `respond` to fill in the waiting job
+and show its question, then append your answer and press Enter.
 
 The response is added to the saved agent transcript, so the resumed run keeps
 the messages and completed tool calls from before the question. A waiting job

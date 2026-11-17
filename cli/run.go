@@ -57,7 +57,7 @@ Usage:
   pearl archive [--all]                                    List archived jobs
   pearl dashboard                                          Watch and control active jobs
   pearl attach <job-id>                                    Stream a job's output
-  pearl respond <job-id> "answer"                          Answer a paused job or follow up on a finished one
+  pearl respond [<job-id> ["answer"]]                      Answer a paused job or follow up on a finished one
   pearl cancel <job-id>                                    Cancel a job
   pearl retry <job-id>                                     Retry a finished job and stream its output
   pearl status                                             Show daemon and queue status
@@ -193,11 +193,7 @@ func Run(args []string) int {
 		}
 		return attachJob(args[1])
 	case "respond":
-		if len(args) < 3 {
-			fmt.Fprintln(os.Stderr, `Usage: pearl respond <job-id> "answer"`)
-			return 2
-		}
-		return respondToJob(args[1], strings.Join(args[2:], " "))
+		return runRespond(args[1:])
 	case "cancel", "retry":
 		if len(args) != 2 {
 			fmt.Fprintf(os.Stderr, "Usage: pearl %s <job-id>\n", args[0])
@@ -703,6 +699,7 @@ func attachWithClientAfter(client *daemonClient, jobID string, after int64) int 
 	}
 	if job.Status == store.JobWaitingInput {
 		fmt.Printf("Job is paused. Respond with:\n  pearl respond %s \"<answer>\"\n", job.ID)
+		fmt.Println("Or run pearl respond to answer interactively.")
 		return 0
 	}
 	if job.Error != "" {
@@ -912,6 +909,10 @@ func respondToJob(jobID, response string) int {
 	if err != nil {
 		return printError("Respond", err)
 	}
+	return respondWithClient(client, jobID, response)
+}
+
+func respondWithClient(client *daemonClient, jobID, response string) int {
 	job, eventSequence, err := client.respondToJob(
 		context.Background(), jobID, response,
 	)

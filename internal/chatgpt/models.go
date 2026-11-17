@@ -17,6 +17,18 @@ type Model struct {
 	ContextWindow int64  `json:"context_window"`
 }
 
+// CheckAccount validates a saved sign-in without changing the selected account
+// or using inference tokens. Expired access tokens are refreshed as needed.
+func (c *Client) CheckAccount(ctx context.Context, id string) error {
+	if id == "" {
+		return errors.New("ChatGPT account ID is required")
+	}
+	account := *c
+	account.accountID = id
+	_, err := account.Models(ctx)
+	return err
+}
+
 func (c *Client) Models(ctx context.Context) ([]Model, error) {
 	token, err := c.AccessToken(ctx)
 	if err != nil {
@@ -61,9 +73,9 @@ func ResponseError(status int, code string) error {
 	}
 	switch status {
 	case 401:
-		return errors.New("ChatGPT session was rejected; run `pearl auth login chatgpt`")
+		return signInRequired("ChatGPT session was rejected; run `pearl auth login chatgpt`")
 	case 403:
-		return errors.New("ChatGPT plan access was denied; check account permissions or sign in again")
+		return signInRequired("ChatGPT plan access was denied; check account permissions or sign in again")
 	case 429:
 		return errors.New("ChatGPT usage limit reached; retry later or manage usage at " + UsageURL)
 	default:

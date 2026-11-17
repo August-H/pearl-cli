@@ -230,6 +230,61 @@ func TestRefreshIsSerializedAndPinnedAccountsDoNotSwitch(t *testing.T) {
 	}
 }
 
+func TestCheckAccountRefreshesTheRequestedSignIn(t *testing.T) {
+	for _, failure := range []string{"", "invalid_grant", "invalid_token"} {
+		t.Run("refresh_"+failure, func(t *testing.T) {
+			var refreshed, checked bool
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/api/accounts/oauth/token":
+					refreshed = true
+					if err := r.ParseForm(); err != nil || r.Form.Get("client_id") != "oaiapp_test" || r.Form.Get("refresh_token") != "refresh-secret" {
+						t.Error("refreshed the wrong account")
+					}
+					if failure != "" {
+						w.WriteHeader(http.StatusBadRequest)
+						json.NewEncoder(w).Encode(map[string]string{"error": failure})
+						return
+					}
+					json.NewEncoder(w).Encode(tokenResponse{AccessToken: "new-access", RefreshToken: "new-refresh", TokenType: "Bearer", ExpiresIn: 3600})
+				case "/models":
+					checked = true
+					if r.Header.Get("Authorization") != "Bearer new-access" {
+						t.Error("check did not use refreshed credentials")
+					}
+					io.WriteString(w, `{"models":[{"slug":"test-model","visibility":"list"}]}`)
+				default:
+					t.Errorf("unexpected request %s", r.URL.Path)
+				}
+			}))
+			defer server.Close()
+			client := &Client{issuerURL: server.URL, apiURL: server.URL}
+			testCredentials(t, client, time.Now().Add(-time.Hour))
+			if err := client.withCredentials(context.Background(), func(s *credentials) error {
+				s.Accounts = append(s.Accounts, Account{ClientID: "other", AccessToken: "other-access"})
+				s.Active = "other"
+				return saveCredentials(s)
+			}); err != nil {
+				t.Fatal(err)
+			}
+			err := client.CheckAccount(context.Background(), "oaiapp_test")
+			if failure == "" && err != nil || failure != "" && !SignInRequired(err) {
+				t.Fatalf("check error = %v", err)
+			}
+			if !refreshed || checked != (failure == "") {
+				t.Fatalf("refreshed=%v checked=%v", refreshed, checked)
+			}
+			saved := readCredentials(t, client)
+			if saved.Active != "other" {
+				t.Fatal("check changed the selected account")
+			}
+			if failure == "" && saved.Accounts[0].RefreshToken != "new-refresh" {
+				t.Fatal("check did not save the rotated refresh token")
+			}
+		})
+	}
+}
+
 func TestCancelledAndRejectedCallbacksNeverExchange(t *testing.T) {
 	t.Setenv("PEARL_CONFIG_DIR", t.TempDir())
 	c := NewClient()
