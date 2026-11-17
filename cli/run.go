@@ -108,7 +108,7 @@ func Run(args []string) int {
 		}
 	}
 	if len(args) == 0 {
-		return runDashboard(nil)
+		return runDashboardWithUpdate(nil)
 	}
 	if args[0] == "help" {
 		switch len(args) {
@@ -183,7 +183,7 @@ func Run(args []string) int {
 		}
 		return listArchivedJobs(showAll)
 	case "dashboard":
-		return runDashboard(args[1:])
+		return runDashboardWithUpdate(args[1:])
 	case "autonomous":
 		return runAutonomous(args[1:])
 	case "attach":

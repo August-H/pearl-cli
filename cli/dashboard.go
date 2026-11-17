@@ -2995,11 +2995,8 @@ func renderDashboardComposerAtCursor(
 			color, ansiDim, dashboardTruncate(leftHint, width),
 		))
 	}
-	if inputCursor != nil {
-		selectionHint := "  Drag to select · F2 mouse scroll"
-		if mouseScroll {
-			selectionHint = "  Mouse scroll on · Shift+drag to select · F2 mouse off"
-		}
+	if inputCursor != nil && mouseScroll {
+		selectionHint := "  Mouse scroll on · Shift+drag to select · F2 mouse off"
 		fmt.Fprintln(&composer, dashboardPaint(color, ansiDim, dashboardTruncate(selectionHint, width)))
 	}
 	return composer.String()
