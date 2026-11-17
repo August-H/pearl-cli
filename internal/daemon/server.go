@@ -17,6 +17,7 @@ import (
 
 	"github.com/August-H/pearl-cli/internal/filelock"
 	"github.com/August-H/pearl-cli/internal/pearlpaths"
+	"github.com/August-H/pearl-cli/internal/resource"
 	"github.com/August-H/pearl-cli/internal/store"
 	"github.com/August-H/pearl-cli/internal/workspacepath"
 	"github.com/August-H/pearl-cli/openrouter_request"
@@ -107,6 +108,24 @@ func Run(ctx context.Context, paths pearlpaths.Paths, runner AgentRunner) error 
 		return fmt.Errorf("recover interrupted jobs: %w", err)
 	}
 
+	// Missing settings retain stored limits. Malformed settings must not
+	// silently disable configured limits.
+	if settings, err := openrouter_request.LoadAgentSettings(); err == nil {
+		if err := state.SetResourceLimits(ctx, store.ResourceLimits{
+			MaxConcurrency: settings.Max_concurrency, MaxSessionJobs: settings.MaxSessionJobs,
+			MaxTokens: settings.MaxTokens, MaxCostUSD: settings.MaxCostUSD,
+			SessionMaxTokens: settings.SessionMaxTokens, SessionMaxCostUSD: settings.SessionMaxCostUSD,
+		}); err != nil {
+			return fmt.Errorf("configure resource limits: %w", err)
+		}
+	} else if !strings.Contains(err.Error(), "settings.json not found") {
+		return err
+	}
+	resources, err := state.ResourceStatus(ctx)
+	if err != nil {
+		return err
+	}
+	ctx = resource.WithConcurrency(ctx, resources.Limits.MaxConcurrency)
 	runtimeContext, cancel := context.WithCancel(ctx)
 	defer cancel()
 	manager := NewManager(state, runner)
@@ -334,9 +353,15 @@ func (s *Server) handleStatus(writer http.ResponseWriter, request *http.Request)
 		writeError(writer, http.StatusInternalServerError, err)
 		return
 	}
+	resources, err := s.store.ResourceStatus(request.Context())
+	if err != nil {
+		writeError(writer, http.StatusInternalServerError, err)
+		return
+	}
 	writeJSON(writer, http.StatusOK, map[string]any{
+		"resources":          resources,
 		"running":            true,
-		"worker_count":       1,
+		"worker_count":       resources.Limits.MaxConcurrency,
 		"current_job_id":     s.manager.Current(),
 		"queued_jobs":        queued,
 		"waiting_input_jobs": waitingInput,

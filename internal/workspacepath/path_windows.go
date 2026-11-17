@@ -32,6 +32,16 @@ func Canonical(path string) (string, error) {
 // LinkCount is 1 on Windows, where FileInfo does not report hard links.
 func LinkCount(os.FileInfo) uint64 { return 1 }
 
+// FileLinkCount queries the open handle because Windows FileInfo omits the
+// number of hard links. Use this before reading file contents.
+func FileLinkCount(file *os.File) (uint64, error) {
+	var information windows.ByHandleFileInformation
+	if err := windows.GetFileInformationByHandle(windows.Handle(file.Fd()), &information); err != nil {
+		return 0, err
+	}
+	return uint64(information.NumberOfLinks), nil
+}
+
 func IsLink(info os.FileInfo) bool {
 	if data, ok := info.Sys().(*syscall.Win32FileAttributeData); ok {
 		return data.FileAttributes&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0

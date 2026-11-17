@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/August-H/pearl-cli/internal/resource"
 	"slices"
 	"strings"
 	"time"
@@ -13,7 +14,7 @@ import (
 
 const autonomousSessionColumns = `id, goal, workspace_root, status, summary, error,
 orchestrator_provider, orchestrator_model, orchestrator_name, allowed_models, all_models,
-max_subagents, plan, created_at, updated_at, finished_at`
+max_subagents, max_jobs, max_tokens, max_cost_usd, plan, created_at, updated_at, finished_at`
 
 func (s *Store) CreateAutonomousSession(
 	ctx context.Context,
@@ -26,6 +27,22 @@ func (s *Store) CreateAutonomousSession(
 	}
 	if workspaceRoot == "" {
 		return AutonomousSession{}, errors.New("workspace root cannot be empty")
+	}
+	limits, err := readResourceLimits(ctx, s.db)
+	if err != nil {
+		return AutonomousSession{}, err
+	}
+	if config.MaxJobs < 0 || !(resource.Usage{Tokens: config.MaxTokens, CostUSD: config.MaxCostUSD}).Valid() {
+		return AutonomousSession{}, errors.New("session limits must be finite and nonnegative")
+	}
+	if config.MaxJobs == 0 {
+		config.MaxJobs = limits.MaxSessionJobs
+	}
+	if config.MaxTokens == 0 {
+		config.MaxTokens = limits.SessionMaxTokens
+	}
+	if config.MaxCostUSD == 0 {
+		config.MaxCostUSD = limits.SessionMaxCostUSD
 	}
 	allowed, err := json.Marshal(config.AllowedModels)
 	if err != nil {
@@ -41,17 +58,18 @@ func (s *Store) CreateAutonomousSession(
 		AllowedModels: config.AllowedModels,
 		AllModels:     config.AllModels,
 		MaxSubagents:  max(1, config.MaxSubagents),
-		CreatedAt:     now,
-		UpdatedAt:     now,
+		MaxJobs:       config.MaxJobs, MaxTokens: config.MaxTokens, MaxCostUSD: config.MaxCostUSD,
+		CreatedAt: now,
+		UpdatedAt: now,
 	}
 	_, err = s.db.ExecContext(ctx, `
 INSERT INTO autonomous_sessions (
     id, goal, workspace_root, status, orchestrator_provider, orchestrator_model,
-    orchestrator_name, allowed_models, all_models, max_subagents, created_at, updated_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    orchestrator_name, allowed_models, all_models, max_subagents, max_jobs, max_tokens, max_cost_usd, created_at, updated_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		session.ID, session.Goal, session.WorkspaceRoot, session.Status,
 		session.Orchestrator.Provider, session.Orchestrator.ID, session.Orchestrator.Name,
-		string(allowed), session.AllModels, session.MaxSubagents,
+		string(allowed), session.AllModels, session.MaxSubagents, session.MaxJobs, session.MaxTokens, session.MaxCostUSD,
 		now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano),
 	)
 	return session, err
@@ -134,7 +152,11 @@ func (s *Store) AutonomousDetails(
 	if err != nil {
 		return AutonomousDetails{}, err
 	}
-	return AutonomousDetails{Session: session, Jobs: jobs, Events: events, Turns: turns, JobActivity: activity}, nil
+	usage, err := readUsage(ctx, s.db, id)
+	if err != nil {
+		return AutonomousDetails{}, err
+	}
+	return AutonomousDetails{Usage: usage, Session: session, Jobs: jobs, Events: events, Turns: turns, JobActivity: activity}, nil
 }
 
 // StartAutonomousTurn records that the orchestrator is being asked again. Any turn
@@ -275,6 +297,16 @@ SELECT workspace_root, status FROM autonomous_sessions WHERE id = ?`,
 		)
 	}
 
+	if err := checkResourceBudget(ctx, transaction, sessionID); err != nil {
+		return Job{}, err
+	}
+	var count, limit int
+	if err := transaction.QueryRowContext(ctx, `SELECT (SELECT COUNT(*) FROM autonomous_jobs WHERE session_id=?), max_jobs FROM autonomous_sessions WHERE id=?`, sessionID, sessionID).Scan(&count, &limit); err != nil {
+		return Job{}, err
+	}
+	if count >= limit {
+		return Job{}, fmt.Errorf("session reached its limit of %d jobs", limit)
+	}
 	created := time.Now().UTC()
 	job := Job{
 		Prompt: prompt, WorkspaceRoot: workspaceRoot,
@@ -398,7 +430,7 @@ func scanAutonomousSession(
 		&session.ID, &session.Goal, &session.WorkspaceRoot, &session.Status,
 		&session.Summary, &session.Error,
 		&session.Orchestrator.Provider, &session.Orchestrator.ID, &session.Orchestrator.Name,
-		&allowed, &session.AllModels, &session.MaxSubagents, &session.Plan,
+		&allowed, &session.AllModels, &session.MaxSubagents, &session.MaxJobs, &session.MaxTokens, &session.MaxCostUSD, &session.Plan,
 		&created, &updated, &finished,
 	)
 	if err != nil {

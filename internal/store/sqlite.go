@@ -43,6 +43,25 @@ func (s *Store) Ping(ctx context.Context) error { return s.db.PingContext(ctx) }
 
 func (s *Store) migrate(ctx context.Context) error {
 	const schema = `
+CREATE TABLE IF NOT EXISTS resource_limits (
+ id INTEGER PRIMARY KEY CHECK(id=1),
+ max_concurrency INTEGER NOT NULL DEFAULT 4,
+ max_session_jobs INTEGER NOT NULL DEFAULT 100,
+ max_tokens INTEGER NOT NULL DEFAULT 0,
+ max_cost_usd REAL NOT NULL DEFAULT 0,
+ session_max_tokens INTEGER NOT NULL DEFAULT 0,
+ session_max_cost_usd REAL NOT NULL DEFAULT 0
+);
+INSERT OR IGNORE INTO resource_limits(id) VALUES(1);
+CREATE TABLE IF NOT EXISTS resource_usage (
+ sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+ job_id TEXT NOT NULL DEFAULT '',
+ session_id TEXT NOT NULL DEFAULT '',
+ tokens INTEGER NOT NULL,
+ cost_usd REAL NOT NULL,
+ created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS resource_usage_session ON resource_usage(session_id);
 CREATE TABLE IF NOT EXISTS jobs (
     id TEXT PRIMARY KEY,
     name TEXT NOT NULL DEFAULT '',
@@ -185,6 +204,9 @@ CREATE TABLE IF NOT EXISTS folders (
 		{name: "all_models", definition: "INTEGER NOT NULL DEFAULT 0"},
 		// Sessions from before this setting ran their jobs one at a time.
 		{name: "max_subagents", definition: "INTEGER NOT NULL DEFAULT 1"},
+		{name: "max_jobs", definition: "INTEGER NOT NULL DEFAULT 100"},
+		{name: "max_tokens", definition: "INTEGER NOT NULL DEFAULT 0"},
+		{name: "max_cost_usd", definition: "REAL NOT NULL DEFAULT 0"},
 		{name: "plan", definition: "TEXT NOT NULL DEFAULT ''"},
 	} {
 		if err := s.ensureColumn(ctx, "autonomous_sessions", column.name, column.definition); err != nil {

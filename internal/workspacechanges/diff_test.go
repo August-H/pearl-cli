@@ -11,6 +11,10 @@ import (
 )
 
 func TestUnifiedDiffAppliesToOriginalContents(t *testing.T) {
+	// Reproduce Git for Windows' default without changing the host's config.
+	t.Setenv("GIT_CONFIG_COUNT", "1")
+	t.Setenv("GIT_CONFIG_KEY_0", "core.autocrlf")
+	t.Setenv("GIT_CONFIG_VALUE_0", "true")
 	long := ""
 	for i := range 40 {
 		long += fmt.Sprintf("line %d\n", i)
@@ -24,6 +28,7 @@ func TestUnifiedDiffAppliesToOriginalContents(t *testing.T) {
 		{"delete", "old\n", "", true, false},
 		{"no-newline", "before", "after", true, true},
 		{"add-newline", "line", "line\n", true, true},
+		{"crlf", "first\r\nold\r\n", "first\r\nnew\r\n", true, true},
 		{"truncate", "old\n", "", true, true},
 		{"separate-hunks", long, strings.ReplaceAll(strings.ReplaceAll(long, "line 4\n", "changed 4\n"), "line 35\n", "changed 35\n"), true, true},
 		{"fallback", strings.Repeat("old\n", 1100), strings.Repeat("new\n", 1100), true, true},
@@ -36,7 +41,7 @@ func TestUnifiedDiffAppliesToOriginalContents(t *testing.T) {
 				writeFile(t, directory, test.name, test.before)
 			}
 			diff := unifiedDiff(test.name, test.before, test.after, test.had, test.has)
-			command := exec.Command("git", "apply", "--whitespace=nowarn", "-")
+			command := exec.Command("git", "-c", "core.autocrlf=false", "apply", "--whitespace=nowarn", "-")
 			command.Dir = directory
 			command.Stdin = strings.NewReader(diff)
 			if output, err := command.CombinedOutput(); err != nil {
@@ -74,7 +79,7 @@ func TestUnifiedDiffRandomEditsApply(t *testing.T) {
 			}
 		}
 		writeFile(t, directory, "file.txt", a.String())
-		command := exec.Command("git", "apply", "--whitespace=nowarn", "-")
+		command := exec.Command("git", "-c", "core.autocrlf=false", "apply", "--whitespace=nowarn", "-")
 		command.Dir = directory
 		command.Stdin = strings.NewReader(unifiedDiff("file.txt", a.String(), b.String(), true, true))
 		if output, err := command.CombinedOutput(); err != nil {

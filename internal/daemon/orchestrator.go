@@ -16,6 +16,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/August-H/pearl-cli/internal/resource"
 	"github.com/August-H/pearl-cli/internal/store"
 	"github.com/August-H/pearl-cli/openrouter_request"
 )
@@ -357,8 +358,8 @@ func (r OrchestratorRunner) Run(
 				corrections = append(corrections, "A job was not started: its prompt was empty.")
 			case len(assignment) > autonomousPromptLimit:
 				corrections = append(corrections, fmt.Sprintf("A job was not started: its prompt exceeds %d bytes.", autonomousPromptLimit))
-			case len(jobs)+created >= autonomousJobLimit:
-				corrections = append(corrections, fmt.Sprintf("A job was not started: this session reached its limit of %d jobs. Finish with what's done.", autonomousJobLimit))
+			case len(jobs)+created >= sessionJobLimit(session):
+				corrections = append(corrections, fmt.Sprintf("A job was not started: this session reached its limit of %d jobs. Finish with what's done.", sessionJobLimit(session)))
 			default:
 				if _, err := tools.CreateJob(ctx, assignment, model); err != nil {
 					tools.TurnFinished(turn, "Failed: "+err.Error())
@@ -533,6 +534,9 @@ func (r OrchestratorRunner) ask(ctx context.Context, session store.AutonomousSes
 			}
 			delay *= 3
 		}
+		if err := resource.Check(ctx); err != nil {
+			return "", err
+		}
 		reply, err := r.askOnce(ctx, session, prompt, recorder)
 		if err == nil {
 			return reply, nil
@@ -674,8 +678,9 @@ func orchestratorPrompt(
 		}
 		fmt.Fprintf(&prompt, "- %s (%s)\n", orchestratorModelKey(model), name)
 	}
-	fmt.Fprintf(&prompt, "\nThe session concurrency ceiling is %d. %d jobs are running or queued. Jobs sharing this folder run one at a time under a workspace lock; additional jobs wait in the queue.\n",
+	fmt.Fprintf(&prompt, "\nThe session concurrency ceiling is %d, subject to the daemon-wide ceiling. %d jobs are running or queued. Jobs sharing this folder run one at a time under a workspace lock; additional jobs wait in the queue.\n",
 		session.MaxSubagents, running)
+	fmt.Fprintf(&prompt, "This session may create %d jobs total; %d have been created.\n", sessionJobLimit(session), len(jobs))
 	if plan != "" {
 		fmt.Fprintf(&prompt, "\nYour plan and notes so far:\n%s\n", plan)
 	}
@@ -737,6 +742,11 @@ func askOrchestrator(ctx context.Context, session store.AutonomousSession, promp
 // askClaude asks the installed Claude Code one question with every tool turned off,
 // passing on its words as they arrive.
 func askClaude(ctx context.Context, model, workspace, prompt string, progress orchestratorProgress) (string, error) {
+	release, err := resource.Acquire(ctx)
+	if err != nil {
+		return "", err
+	}
+	defer release()
 	path, err := FindClaude()
 	if err != nil {
 		return "", err
@@ -766,6 +776,16 @@ func askClaude(ctx context.Context, model, workspace, prompt string, progress or
 	defer stop()
 	result := readClaudeStream(stdout, progress)
 	waitErr := command.Wait()
+	var report claudeEvent
+	if json.Unmarshal(result, &report) == nil {
+		var tokens int64
+		if report.Usage != nil {
+			tokens = report.Usage.Total()
+		}
+		if err := resource.Report(ctx, resource.Usage{Tokens: tokens, CostUSD: report.TotalCostUSD}); err != nil {
+			return "", err
+		}
+	}
 	return parseClaudeAnswer(result, stderr.String(), waitErr)
 }
 
@@ -884,6 +904,11 @@ func (t *antigravityTurn) notification(method string, params json.RawMessage) er
 // runs in a sandbox around a scratch folder, so it can't reach the project even if
 // it tries to use a tool.
 func askAntigravity(ctx context.Context, model, prompt string, progress orchestratorProgress) (string, error) {
+	release, err := resource.Acquire(ctx)
+	if err != nil {
+		return "", err
+	}
+	defer release()
 	install, err := FindAntigravity()
 	if err != nil {
 		return "", err
@@ -963,4 +988,11 @@ func askAntigravity(ctx context.Context, model, prompt string, progress orchestr
 	turn.lock.Lock()
 	defer turn.lock.Unlock()
 	return turn.message.String(), nil
+}
+
+func sessionJobLimit(session store.AutonomousSession) int {
+	if session.MaxJobs > 0 {
+		return session.MaxJobs
+	}
+	return autonomousJobLimit
 }

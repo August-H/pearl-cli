@@ -8,6 +8,11 @@ type Settings struct {
 	ChatGPTModel              string   `json:"chatgpt_model,omitempty"`
 	ClaudeModel               string   `json:"claude_model,omitempty"`
 	AntigravityModel          string   `json:"antigravity_model,omitempty"`
+	MaxSessionJobs            int      `json:"max_session_jobs,omitempty"`
+	MaxTokens                 int64    `json:"max_tokens,omitempty"`
+	MaxCostUSD                float64  `json:"max_cost_usd,omitempty"`
+	SessionMaxTokens          int64    `json:"session_max_tokens,omitempty"`
+	SessionMaxCostUSD         float64  `json:"session_max_cost_usd,omitempty"`
 	Max_concurrency           int      `json:"max_concurrency"`
 	Max_depth                 int      `json:"max_depth"`
 	Mode                      string   `json:"mode"`

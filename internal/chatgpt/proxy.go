@@ -6,6 +6,7 @@ import (
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
+	budgets "github.com/August-H/pearl-cli/internal/resource"
 	"io"
 	"net"
 	"net/http"
@@ -37,6 +38,10 @@ func (c *Client) StartProxy(ctx context.Context) (*Proxy, error) {
 		}
 		if r.Method != "POST" || r.URL.Path != "/v1/responses" {
 			http.NotFound(w, r)
+			return
+		}
+		if err := budgets.Check(r.Context()); err != nil {
+			http.Error(w, err.Error(), http.StatusTooManyRequests)
 			return
 		}
 		var payload map[string]any
@@ -75,6 +80,7 @@ func (c *Client) StartProxy(ctx context.Context) (*Proxy, error) {
 			return
 		}
 		defer resp.Body.Close()
+		resp.Body = &budgets.UsageReader{Body: resp.Body, Report: func(u budgets.Usage) error { return budgets.Report(ctx, u) }}
 		w.Header().Set("Content-Type", resp.Header.Get("Content-Type"))
 		w.WriteHeader(resp.StatusCode)
 		buffer := make([]byte, 32<<10)

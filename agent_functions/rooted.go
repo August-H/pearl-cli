@@ -16,6 +16,8 @@ import (
 // The *In functions do all file access through an os.Root, which refuses at
 // open time to follow any link out of the root. Names are relative to it.
 
+var ErrHardLinkedFile = errors.New("file has multiple hard links")
+
 // ReadFileIn reads a regular file. Files with more than one hard link are
 // refused, because the other link may be a file outside the root.
 func ReadFileIn(root *os.Root, name string, maxBytes int64) (string, error) {
@@ -35,8 +37,15 @@ func readOpenFile(file fs.File, maxBytes int64) (string, error) {
 	if !info.Mode().IsRegular() {
 		return "", errors.New("not a regular file")
 	}
-	if links := workspacepath.LinkCount(info); links > 1 {
-		return "", fmt.Errorf("file has %d hard links, so it may be a file from outside the workspace; Pearl won't read it", links)
+	links := workspacepath.LinkCount(info)
+	if opened, ok := file.(*os.File); ok {
+		links, err = workspacepath.FileLinkCount(opened)
+		if err != nil {
+			return "", fmt.Errorf("check file hard links: %w", err)
+		}
+	}
+	if links > 1 {
+		return "", fmt.Errorf("%w (%d), so it may be a file from outside the workspace; Pearl won't read it", ErrHardLinkedFile, links)
 	}
 	if info.Size() > maxBytes {
 		return "", fmt.Errorf("file is %d bytes; maximum readable size is %d", info.Size(), maxBytes)

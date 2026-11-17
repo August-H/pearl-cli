@@ -205,6 +205,21 @@ func printDaemonStatus() int {
 		return 1
 	}
 	fmt.Println("Pearl daemon is running")
+	if resources, ok := status["resources"].(map[string]any); ok {
+		if limits, ok := resources["limits"].(map[string]any); ok {
+			if concurrency, ok := limits["max_concurrency"].(float64); ok {
+				fmt.Println("Concurrency limit:", int(concurrency))
+			}
+		}
+		if usage, ok := resources["usage"].(map[string]any); ok {
+			tokens, _ := usage["tokens"].(float64)
+			cost, _ := usage["cost_usd"].(float64)
+			fmt.Printf("Recorded usage: %.0f tokens, $%.6f\n", tokens, cost)
+		}
+		if reason, _ := resources["exhausted"].(string); reason != "" {
+			fmt.Println("Dispatch paused:", reason)
+		}
+	}
 	if current, _ := status["current_job_id"].(string); current != "" {
 		fmt.Println("Current job:", current)
 	}

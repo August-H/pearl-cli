@@ -2,6 +2,7 @@ package store
 
 import (
 	"fmt"
+	"github.com/August-H/pearl-cli/internal/resource"
 	"strings"
 	"time"
 )
@@ -129,8 +130,11 @@ type AutonomousConfig struct {
 	Orchestrator  AutonomousModel   `json:"orchestrator"`
 	AllowedModels []AutonomousModel `json:"allowed_models"`
 	// AllModels records that the user left the list unrestricted.
-	AllModels    bool `json:"all_models"`
-	MaxSubagents int  `json:"max_subagents"`
+	AllModels    bool    `json:"all_models"`
+	MaxSubagents int     `json:"max_subagents"`
+	MaxJobs      int     `json:"max_jobs"`
+	MaxTokens    int64   `json:"max_tokens"`
+	MaxCostUSD   float64 `json:"max_cost_usd"`
 }
 
 type AutonomousSession struct {
@@ -144,6 +148,9 @@ type AutonomousSession struct {
 	AllowedModels []AutonomousModel `json:"allowed_models,omitempty"`
 	AllModels     bool              `json:"all_models,omitempty"`
 	MaxSubagents  int               `json:"max_subagents"`
+	MaxJobs       int               `json:"max_jobs"`
+	MaxTokens     int64             `json:"max_tokens"`
+	MaxCostUSD    float64           `json:"max_cost_usd"`
 	Plan          string            `json:"plan,omitempty"`
 	CreatedAt     time.Time         `json:"created_at"`
 	UpdatedAt     time.Time         `json:"updated_at"`
@@ -176,6 +183,7 @@ type AutonomousTurn struct {
 
 type AutonomousDetails struct {
 	Session AutonomousSession `json:"session"`
+	Usage   resource.Usage    `json:"usage"`
 	Jobs    []Job             `json:"jobs"`
 	Events  []Event           `json:"events,omitempty"`
 	Turns   []AutonomousTurn  `json:"turns,omitempty"`

@@ -79,3 +79,25 @@ func TestLinkCountSeesHardLinks(t *testing.T) {
 		t.Fatalf("LinkCount after link = %d", LinkCount(info))
 	}
 }
+
+func TestFileLinkCountSeesHardLinksOnOpenHandle(t *testing.T) {
+	directory := t.TempDir()
+	original := filepath.Join(directory, "original")
+	if err := os.WriteFile(original, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	file, err := os.Open(original)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer file.Close()
+	if count, err := FileLinkCount(file); err != nil || count != 1 {
+		t.Fatalf("initial link count = %d, %v", count, err)
+	}
+	if err := os.Link(original, filepath.Join(directory, "alias")); err != nil {
+		t.Skipf("hard links unavailable: %v", err)
+	}
+	if count, err := FileLinkCount(file); err != nil || count != 2 {
+		t.Fatalf("linked handle count = %d, %v", count, err)
+	}
+}

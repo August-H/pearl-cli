@@ -131,6 +131,10 @@ func Capture(ctx context.Context, directory string, previous *Snapshot) (Snapsho
 			file.Omitted = "32 MiB snapshot limit reached; contents not captured"
 		default:
 			content, err := agent_functions.ReadFileIn(root, filepath.FromSlash(name), min(maxFileBytes, int64(maxSnapshotBytes-used)))
+			if errors.Is(err, agent_functions.ErrHardLinkedFile) {
+				file.Omitted = "hard-linked file; contents not read"
+				break
+			}
 			if err != nil {
 				return Snapshot{}, fmt.Errorf("capture %s: %w", name, err)
 			}
