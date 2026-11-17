@@ -30,8 +30,10 @@ var updateHTTPClient = &http.Client{Timeout: 60 * time.Second}
 var applyUpdate = selfupdate.Apply
 
 type updateRelease struct {
-	TagName string        `json:"tag_name"`
-	Assets  []updateAsset `json:"assets"`
+	TagName    string        `json:"tag_name"`
+	Assets     []updateAsset `json:"assets"`
+	Draft      bool          `json:"draft"`
+	Prerelease bool          `json:"prerelease"`
 }
 
 type updateAsset struct {

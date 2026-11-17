@@ -114,8 +114,11 @@ func TestDashboardComposerMasksKeyAndShowsSelectionMode(t *testing.T) {
 		if !strings.Contains(output, "••█••••") || strings.Contains(output, "sécret") {
 			t.Fatalf("key masking or cursor position is wrong: %s", output)
 		}
-		if mouse && !strings.Contains(output, "Shift+drag") || !mouse && !strings.Contains(output, "Drag to select") {
-			t.Fatalf("missing selection hint: %s", output)
+		if mouse && !strings.Contains(output, "Shift+drag") {
+			t.Fatalf("missing mouse selection hint: %s", output)
+		}
+		if !mouse && (strings.Contains(output, "Drag to select") || strings.Contains(output, "F2 mouse scroll")) {
+			t.Fatalf("unexpected selection hint: %s", output)
 		}
 	}
 }

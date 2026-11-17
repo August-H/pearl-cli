@@ -584,6 +584,23 @@ the job. Use `pearl cancel` when cancellation is intended.
 
 ## Updating Pearl
 
+Launching `pearl` or `pearl dashboard` in an interactive terminal checks GitHub
+for a newer release before opening the dashboard. When one is available, Pearl
+shows the current and new versions, a release-notes link, and these choices:
+
+- **Update now** runs the same verified installer as `pearl update`, then exits.
+  Run `pearl` again to use the new version.
+- **Install later** opens the dashboard and asks again on the next launch.
+- **Skip this version** opens the dashboard and hides the prompt until another
+  version is released.
+
+Use the arrow keys or `j`/`k` and Enter, or press `1`, `2`, or `3` to choose.
+Esc, Ctrl-C, and Ctrl-D select Install later. Successful checks are cached for
+20 hours in `updates.json` in Pearl's config directory. A fresh check waits at
+most two seconds; network errors never prevent the dashboard from opening.
+Development builds, non-interactive runs, and other commands do not check.
+Set `PEARL_NO_UPDATE_CHECK=1` to disable startup checks and prompts.
+
 ```bash
 pearl update --check   # show the latest release without installing
 pearl update           # download, verify, and install the latest release
