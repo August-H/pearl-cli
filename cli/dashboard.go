@@ -2563,37 +2563,6 @@ func renderDashboardParts(
 			}
 		}
 	}
-	var recentJobs []store.Job
-	for _, job := range jobs {
-		if job.Status == store.JobCompleted || job.Status == store.JobFailed || job.Status == store.JobInterrupted {
-			recentJobs = append(recentJobs, job)
-		}
-	}
-	slices.SortFunc(recentJobs, func(a, b store.Job) int {
-		at, bt := a.CreatedAt, b.CreatedAt
-		if a.FinishedAt != nil {
-			at = *a.FinishedAt
-		}
-		if b.FinishedAt != nil {
-			bt = *b.FinishedAt
-		}
-		return bt.Compare(at)
-	})
-	recent := 0
-	for _, job := range recentJobs {
-		if job.Status != store.JobCompleted && job.Status != store.JobFailed && job.Status != store.JobInterrupted {
-			continue
-		}
-		if recent == 0 {
-			fmt.Fprintln(&frame, "\n"+dashboardTruncate("Recent work · respond <job-id> \"follow-up\"", width))
-		}
-		fmt.Fprintln(&frame, dashboardTruncate("  "+job.ID+" · "+job.Status+" · Tests: "+jobVerificationLabel(job), width))
-		recent++
-		if recent == 2 {
-			break
-		}
-	}
-
 	if commandView.command != "" {
 		fmt.Fprintln(&frame)
 		fmt.Fprint(&frame, renderDashboardCommandOutput(commandView, width, color))

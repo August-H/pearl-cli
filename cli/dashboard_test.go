@@ -10,7 +10,7 @@ import (
 	"github.com/August-H/pearl-cli/internal/store"
 )
 
-func TestRenderDashboardShowsActiveJobsAndRecentWork(t *testing.T) {
+func TestRenderDashboardShowsOnlyActiveJobs(t *testing.T) {
 	now := time.Date(2026, time.August, 18, 12, 30, 0, 0, time.UTC)
 	started := now.Add(-45 * time.Second)
 	jobs := []store.Job{
@@ -58,8 +58,8 @@ func TestRenderDashboardShowsActiveJobsAndRecentWork(t *testing.T) {
 	if strings.Contains(output, "Pearl jobs") {
 		t.Fatalf("dashboard still uses the old title:\n%s", output)
 	}
-	if !strings.Contains(output, "job_finished · completed") || !strings.Contains(output, "Recent work") || strings.Contains(output, "do not show this") {
-		t.Fatalf("dashboard did not separate recent work from active jobs:\n%s", output)
+	if strings.Contains(output, "job_finished") || strings.Contains(output, "Recent work") || strings.Contains(output, "do not show this") {
+		t.Fatalf("dashboard still shows recent work:\n%s", output)
 	}
 	if !strings.Contains(output, ansiGreen) || !strings.Contains(output, ansiYellow) ||
 		!strings.Contains(output, ansiMagenta) {
