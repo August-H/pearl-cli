@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/August-H/pearl-cli/internal/resource"
 	"github.com/August-H/pearl-cli/internal/store"
 	"github.com/August-H/pearl-cli/openrouter_request"
 )
@@ -44,6 +45,8 @@ func validateAutonomousConfig(config *store.AutonomousConfig) error {
 		return fmt.Errorf("goal exceeds %d bytes", autonomousPromptLimit)
 	case config.MaxSubagents < 1 || config.MaxSubagents > AutonomousMaxSubagents:
 		return fmt.Errorf("max subagents must be between 1 and %d", AutonomousMaxSubagents)
+	case config.MaxJobs < 0 || !(resource.Usage{Tokens: config.MaxTokens, CostUSD: config.MaxCostUSD}).Valid():
+		return errors.New("session limits must be finite and nonnegative")
 	case len(config.AllowedModels) == 0:
 		return errors.New("allow at least one subagent model")
 	case len(config.AllowedModels) > autonomousModelLimit:
@@ -148,6 +151,14 @@ func (manager *AutonomousManager) loop(ctx context.Context) {
 		}
 		for _, session := range sessions {
 			if session.Status == store.AutonomousWaitingInput {
+				if err := manager.store.CheckResourceBudget(ctx, "", session.ID); err != nil {
+					if errors.Is(err, resource.ErrBudgetExceeded) {
+						if updateErr := manager.store.UpdateAutonomousSession(ctx, session.ID, store.AutonomousFailed, "", err.Error()); updateErr == nil {
+							manager.cancelQueuedJobs(session.ID)
+						}
+					}
+					continue
+				}
 				jobs, err := manager.store.ListAutonomousJobs(ctx, session.ID)
 				if err != nil || autonomousJobsWaiting(jobs) {
 					continue
@@ -174,6 +185,7 @@ func (manager *AutonomousManager) startSession(
 		return
 	}
 	ctx, cancel := context.WithCancel(parent)
+	ctx = manager.store.BudgetContext(ctx, "", session.ID)
 	manager.running[session.ID] = cancel
 	manager.wait.Add(1)
 	manager.mu.Unlock()
@@ -194,6 +206,9 @@ func (manager *AutonomousManager) startSession(
 				return job, err
 			},
 			ListJobs: func(ctx context.Context) ([]store.Job, error) {
+				if err := manager.store.CheckResourceBudget(ctx, "", session.ID); err != nil {
+					return nil, err
+				}
 				return manager.store.ListAutonomousJobs(ctx, session.ID)
 			},
 			RespondToJob: func(ctx context.Context, job store.Job, response string) error {

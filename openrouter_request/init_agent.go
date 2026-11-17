@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/August-H/pearl-cli/internal/chatgpt"
+	"github.com/August-H/pearl-cli/internal/resource"
 	"github.com/August-H/pearl-cli/internal/verification"
 	"github.com/August-H/pearl-cli/internal/workspacepath"
 )
@@ -73,6 +74,12 @@ type reasoningDetailText struct {
 }
 
 type agentStreamChunk struct {
+	Usage *struct {
+		TotalTokens      int64   `json:"total_tokens"`
+		PromptTokens     int64   `json:"prompt_tokens"`
+		CompletionTokens int64   `json:"completion_tokens"`
+		Cost             float64 `json:"cost"`
+	} `json:"usage"`
 	Model   string `json:"model"`
 	Choices []struct {
 		Delta        agentStreamDelta `json:"delta"`
@@ -688,6 +695,11 @@ func requestAgentCompletionWithReasoning(
 	tools []map[string]any,
 	reasoningEnabled bool,
 ) (agentMessage, error) {
+	release, err := resource.Acquire(ctx)
+	if err != nil {
+		return agentMessage{}, err
+	}
+	defer release()
 	if _, ok := ctx.Value(providerContextKey{}).(*chatgpt.Client); ok {
 		return requestChatGPTCompletion(ctx, client, model, messages, events, tools)
 	}
@@ -784,6 +796,15 @@ func requestAgentCompletionWithReasoning(
 				chunk.Error.Code,
 				chunk.Error.Message,
 			)
+		}
+		if chunk.Usage != nil {
+			tokens := chunk.Usage.TotalTokens
+			if tokens == 0 {
+				tokens = chunk.Usage.PromptTokens + chunk.Usage.CompletionTokens
+			}
+			if err := resource.Report(ctx, resource.Usage{Tokens: tokens, CostUSD: chunk.Usage.Cost}); err != nil {
+				return agentMessage{}, err
+			}
 		}
 		if assistantMessage.Model == "" {
 			assistantMessage.Model = strings.TrimSpace(chunk.Model)

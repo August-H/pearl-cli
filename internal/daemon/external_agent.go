@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/August-H/pearl-cli/internal/resource"
 	"github.com/August-H/pearl-cli/internal/store"
 	"github.com/August-H/pearl-cli/internal/workspacepath"
 	"github.com/August-H/pearl-cli/openrouter_request"
@@ -35,6 +36,16 @@ func startExternalRun(
 	state openrouter_request.CheckpointStore,
 	sessionEvent string,
 ) (*externalRun, context.CancelFunc, error) {
+	release, err := resource.Acquire(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
+	success := false
+	defer func() {
+		if !success {
+			release()
+		}
+	}()
 	settings, err := openrouter_request.LoadAgentSettings()
 	if err != nil {
 		return nil, nil, err
@@ -50,11 +61,13 @@ func startExternalRun(
 	if maxDuration <= 0 {
 		maxDuration = 30 * time.Minute
 	}
-	ctx, cancel := context.WithTimeout(ctx, maxDuration)
+	ctx, timeoutCancel := context.WithTimeout(ctx, maxDuration)
+	var releaseOnce sync.Once
+	cancel := func() { timeoutCancel(); releaseOnce.Do(release) }
 
 	sessionID, answer, err := codexResumeState(ctx, job, state, sessionEvent)
 	if err != nil {
-		cancel()
+		timeoutCancel()
 		return nil, nil, err
 	}
 	prompt := resumePrompt(job, sessionID, answer)
@@ -75,10 +88,11 @@ func startExternalRun(
 	}
 	if answer != "" {
 		if err := lockedEvents(openrouter_request.AgentEvent{Type: codexInputUsedEvent, Data: job.InputToolCallID}); err != nil {
-			cancel()
+			timeoutCancel()
 			return nil, nil, fmt.Errorf("record answer: %w", err)
 		}
 	}
+	success = true
 	return &externalRun{
 		ctx: ctx, settings: settings, sessionID: sessionID, answer: answer, prompt: prompt,
 		parser: &codexEventParser{

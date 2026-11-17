@@ -16,9 +16,11 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/August-H/pearl-cli/internal/chatgpt"
+	"github.com/August-H/pearl-cli/internal/resource"
 	"github.com/August-H/pearl-cli/internal/store"
 	"github.com/August-H/pearl-cli/internal/verification"
 	"github.com/August-H/pearl-cli/internal/workspacepath"
@@ -100,6 +102,11 @@ func (r CodexRunner) Run(
 	events openrouter_request.EventSink,
 	state openrouter_request.CheckpointStore,
 ) (string, error) {
+	release, err := resource.Acquire(ctx)
+	if err != nil {
+		return "", err
+	}
+	defer release()
 	settings, err := openrouter_request.LoadAgentSettings()
 	if err != nil {
 		return "", err
@@ -192,8 +199,13 @@ func (r CodexRunner) Run(
 			_ = lockedEvents(openrouter_request.AgentEvent{Type: "model", Data: model})
 		}
 	}
+	var transportUsage atomic.Bool
+	proxyContext := resource.WithBudget(ctx, func(context.Context) error { return resource.Check(ctx) }, func(_ context.Context, u resource.Usage) error {
+		transportUsage.Store(true)
+		return resource.Report(ctx, u)
+	})
 	if provider == openrouter_request.ProviderChatGPT {
-		proxy, err := chatGPTAccount.StartProxy(ctx)
+		proxy, err := chatGPTAccount.StartProxy(proxyContext)
 		if err != nil {
 			return "", fmt.Errorf("start ChatGPT transport: %w", err)
 		}
@@ -202,7 +214,7 @@ func (r CodexRunner) Run(
 		apiKey = proxy.Key
 		reportModel(settings.Model)
 	} else {
-		proxy, err := startCodexModelProxy(upstream, reportModel)
+		proxy, err := startCodexModelProxyWithBudget(proxyContext, upstream, reportModel)
 		if err == nil {
 			defer proxy.close()
 			baseURL = proxy.baseURL()
@@ -231,14 +243,20 @@ func (r CodexRunner) Run(
 	}
 
 	parser := &codexEventParser{
-		ctx:        ctx,
-		job:        job,
-		events:     lockedEvents,
-		state:      state,
-		transcript: transcript,
-		idPrefix:   fmt.Sprintf("codex-%d-", time.Now().UnixNano()),
+		ctx:           ctx,
+		usageReported: &transportUsage,
+		job:           job,
+		events:        lockedEvents,
+		state:         state,
+		transcript:    transcript,
+		idPrefix:      fmt.Sprintf("codex-%d-", time.Now().UnixNano()),
 	}
 	parseErr := parser.read(stdout)
+	// Preserve the read error when cancellation is only process cleanup.
+	readContextErr := ctx.Err()
+	if parseErr != nil {
+		cancel()
+	}
 	waitErr := command.Wait()
 	if saved, err := json.Marshal(parser.transcript); err == nil {
 		saveContext, saveCancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -247,6 +265,8 @@ func (r CodexRunner) Run(
 	}
 
 	switch {
+	case parseErr != nil && readContextErr == nil:
+		return "", parseErr
 	case ctx.Err() != nil:
 		return "", fmt.Errorf("Codex stopped: %w", ctx.Err())
 	case parseErr != nil:
@@ -506,10 +526,11 @@ type codexTranscriptCall struct {
 }
 
 type codexEvent struct {
-	Type     string     `json:"type"`
-	ThreadID string     `json:"thread_id"`
-	Message  string     `json:"message"`
-	Item     *codexItem `json:"item"`
+	Usage    *resource.ProviderUsage `json:"usage"`
+	Type     string                  `json:"type"`
+	ThreadID string                  `json:"thread_id"`
+	Message  string                  `json:"message"`
+	Item     *codexItem              `json:"item"`
 	Error    *struct {
 		Message string `json:"message"`
 	} `json:"error"`
@@ -534,12 +555,13 @@ type codexItem struct {
 }
 
 type codexEventParser struct {
-	ctx        context.Context
-	job        store.Job
-	events     openrouter_request.EventSink
-	state      openrouter_request.CheckpointStore
-	transcript []codexTranscriptMessage
-	idPrefix   string
+	ctx           context.Context
+	usageReported *atomic.Bool
+	job           store.Job
+	events        openrouter_request.EventSink
+	state         openrouter_request.CheckpointStore
+	transcript    []codexTranscriptMessage
+	idPrefix      string
 
 	reasoning     string
 	lastEmitted   string
@@ -580,6 +602,9 @@ func (p *codexEventParser) handle(event codexEvent) error {
 		}
 	case "turn.completed":
 		p.completed = true
+		if event.Usage != nil && (p.usageReported == nil || !p.usageReported.Load()) {
+			return resource.Report(p.ctx, resource.Usage{Tokens: event.Usage.Total()})
+		}
 	case "turn.failed":
 		if event.Error != nil {
 			p.failure = "Codex failed: " + event.Error.Message

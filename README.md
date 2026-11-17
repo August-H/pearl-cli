@@ -760,6 +760,11 @@ conservative bounds:
 ```json
 {
   "max_concurrency": 1,
+  "max_session_jobs": 100,
+  "max_tokens": 0,
+  "max_cost_usd": 0,
+  "session_max_tokens": 0,
+  "session_max_cost_usd": 0,
   "max_depth": 30,
   "max_job_seconds": 1800,
   "max_file_bytes": 4194304,
@@ -768,6 +773,50 @@ conservative bounds:
   "approved_workspace_roots": []
 }
 ```
+
+`max_concurrency` is a daemon-wide ceiling shared by ordinary jobs and every
+session's subagents. Provider calls, including orchestrator turns and external
+CLI runs, share a pool of the same size. Ordinary jobs still run one at a time,
+and a session's Max Subagents can further restrict its parallel jobs. An omitted
+or zero `max_concurrency` uses 4. Newly generated settings use 1. Restart the
+daemon after changing these settings.
+
+`max_session_jobs` sets the default total number of jobs a session may create,
+including finished and archived jobs. An omitted or zero value uses 100.
+`session_max_tokens` and `session_max_cost_usd` set usage caps for new sessions.
+Override these defaults for a new session with flags before the goal:
+
+```sh
+pearl autonomous --max-jobs 20 --max-tokens 500000 --max-cost-usd 5 "Prepare the release"
+```
+
+The autonomous API also accepts `max_jobs`, `max_tokens`, and `max_cost_usd`.
+Zero uses the configured session default. Session limits are saved when the
+session starts. Negative limits are rejected.
+
+`max_tokens` and `max_cost_usd` in settings apply to all jobs and orchestrator
+turns combined. Zero disables a usage cap. These totals live in the database,
+survive restarts, and do not reset daily or when jobs are retried or archived.
+Raise the cap or set it to zero to resume dispatch after exhaustion. The status
+API's `resources` field and `pearl daemon status` show limits, recorded usage,
+and the exhaustion reason;
+autonomous details include that session's `usage`.
+
+Caps use reported usage. OpenRouter reports tokens and cost, ChatGPT and Codex
+report tokens, and Claude Code reports tokens and estimated cost. Claude's token
+totals include cache reads and writes. Codex transports also record OpenRouter
+cost when it is present in Responses events. Antigravity does not currently
+report job usage through Pearl's ACP integration, so its work is subject to the
+concurrency and job-count limits only. Missing usage is not estimated.
+See [OpenRouter usage accounting](https://openrouter.ai/docs/cookbook/administration/usage-accounting)
+and [Claude cost reporting](https://code.claude.com/docs/en/agent-sdk/cost-tracking).
+
+When reported usage reaches a cap, Pearl stops dispatching affected queued jobs
+and rejects further model requests. An exhausted autonomous session fails with
+a budget error and cancels its queued jobs. Running requests can finish and add
+to the total, so caps can overshoot by work already in flight. A provider that
+reports usage only at the end of a CLI run cannot be stopped mid-run by these
+caps. They are approximate execution budgets, not billing guarantees.
 
 Context sizes are conservative estimates because exact tokenization varies by
 model. Lower the trigger for models with small context windows, or raise it for
